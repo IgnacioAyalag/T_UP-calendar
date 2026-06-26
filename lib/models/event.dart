@@ -30,6 +30,7 @@ class SubEvent {
 }
 
 class Event {
+  String id;
   String title;
   String description;
   DateTime startTime;
@@ -39,8 +40,11 @@ class Event {
   List<SubEvent> subEvents;
   List<String> groupIds;
   RepeatConfig repeatConfig;
+  // Minutes before startTime to fire a reminder notification. Null = no reminder.
+  int? notifyMinutesBefore;
 
   Event({
+    String? id,
     required this.title,
     this.description = '',
     required this.startTime,
@@ -50,11 +54,15 @@ class Event {
     List<SubEvent>? subEvents,
     List<String>? groupIds,
     RepeatConfig? repeatConfig,
-  })  : this.subEvents = subEvents ?? [],
+    this.notifyMinutesBefore,
+  })  : this.id = id ??
+            '${DateTime.now().microsecondsSinceEpoch}_${identityHashCode(startTime)}',
+        this.subEvents = subEvents ?? [],
         this.groupIds = groupIds ?? [],
         this.repeatConfig = repeatConfig ?? RepeatConfig();
 
   Map<String, dynamic> toJson() => {
+        'id': id,
         'title': title,
         'description': description,
         'startTime': startTime.toIso8601String(),
@@ -64,9 +72,14 @@ class Event {
         'subEvents': subEvents.map((e) => e.toJson()).toList(),
         'groupIds': groupIds,
         'repeatConfig': repeatConfig.toJson(),
+        'notifyMinutesBefore': notifyMinutesBefore,
       };
 
   factory Event.fromJson(Map<String, dynamic> json) => Event(
+        // Older saved events won't have an id — generate one on load so they
+        // still get a stable identity from now on (instead of crashing).
+        id: json['id'] ??
+            '${DateTime.now().microsecondsSinceEpoch}_${json.hashCode}',
         title: json['title'],
         description: json['description'] ?? '',
         startTime: DateTime.parse(json['startTime']),
@@ -81,5 +94,6 @@ class Event {
         repeatConfig: json['repeatConfig'] != null
             ? RepeatConfig.fromJson(json['repeatConfig'])
             : RepeatConfig(),
+        notifyMinutesBefore: json['notifyMinutesBefore'],
       );
 }

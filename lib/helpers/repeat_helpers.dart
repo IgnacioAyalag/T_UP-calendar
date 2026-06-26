@@ -71,6 +71,7 @@ List<Event> expandEventWithRepeat(Event source) {
             subEvents: source.subEvents,
             groupIds: List.from(source.groupIds),
             repeatConfig: RepeatConfig(),
+            notifyMinutesBefore: source.notifyMinutesBefore,
           ))
       .toList();
 }

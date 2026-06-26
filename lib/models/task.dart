@@ -19,6 +19,7 @@ class SubTask {
 }
 
 class Task {
+  String id;
   String name;
   String description;
   bool isCompleted;
@@ -29,8 +30,12 @@ class Task {
   DateTime? completedDate;
   List<String> groupIds;
   RepeatConfig repeatConfig;
+  // Internal bookkeeping so the "expiring soon" notification only fires once
+  // per task instead of every time the task list is checked.
+  bool expiringSoonNotified;
 
   Task({
+    String? id,
     required this.name,
     required this.description,
     this.isCompleted = false,
@@ -41,11 +46,15 @@ class Task {
     this.completedDate,
     List<String>? groupIds,
     RepeatConfig? repeatConfig,
-  })  : this.subtasks = subtasks ?? [],
+    this.expiringSoonNotified = false,
+  })  : this.id = id ??
+            '${DateTime.now().microsecondsSinceEpoch}_${identityHashCode(name)}',
+        this.subtasks = subtasks ?? [],
         this.groupIds = groupIds ?? [],
         this.repeatConfig = repeatConfig ?? RepeatConfig();
 
   Map<String, dynamic> toJson() => {
+        'id': id,
         'name': name,
         'description': description,
         'isCompleted': isCompleted,
@@ -56,9 +65,14 @@ class Task {
         'completedDate': completedDate?.toIso8601String(),
         'groupIds': groupIds,
         'repeatConfig': repeatConfig.toJson(),
+        'expiringSoonNotified': expiringSoonNotified,
       };
 
   factory Task.fromJson(Map<String, dynamic> json) => Task(
+        // Older saved tasks won't have an id — generate one on load so they
+        // get a stable identity going forward.
+        id: json['id'] ??
+            '${DateTime.now().microsecondsSinceEpoch}_${json.hashCode}',
         name: json['name'],
         description: json['description'] ?? '',
         isCompleted: json['isCompleted'] ?? false,
@@ -79,5 +93,6 @@ class Task {
         repeatConfig: json['repeatConfig'] != null
             ? RepeatConfig.fromJson(json['repeatConfig'])
             : RepeatConfig(),
+        expiringSoonNotified: json['expiringSoonNotified'] ?? false,
       );
 }

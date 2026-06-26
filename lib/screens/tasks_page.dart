@@ -1,4 +1,4 @@
-import 'package:t_up_calendar/widgets/group_sheets.dart';
+import 'package:T_UP/widgets/group_sheets.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import '../models/task.dart';

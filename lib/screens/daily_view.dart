@@ -290,6 +290,7 @@ class _DailyViewState extends State<DailyView> {
         existingEvent != null ? List.from(existingEvent.groupIds) : [];
     RepeatConfig localRepeatConfig =
         existingEvent?.repeatConfig.clone() ?? RepeatConfig();
+    int? localNotifyMinutesBefore = existingEvent?.notifyMinutesBefore;
 
     showDialog(
       context: context,
@@ -541,6 +542,60 @@ class _DailyViewState extends State<DailyView> {
                         ),
                       ),
                       SizedBox(height: 14),
+                      // ── Notify-before picker ─────────────────────────
+                      Text('Remind me',
+                          style: TextStyle(
+                              fontSize: 12, fontWeight: FontWeight.bold)),
+                      SizedBox(height: 6),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: const <MapEntry<String, int?>>[
+                          MapEntry('Off', null),
+                          MapEntry('5 min', 5),
+                          MapEntry('15 min', 15),
+                          MapEntry('30 min', 30),
+                          MapEntry('1 hour', 60),
+                          MapEntry('1 day', 1440),
+                        ].map((entry) {
+                          final selected =
+                              localNotifyMinutesBefore == entry.value;
+                          return GestureDetector(
+                            onTap: () => setDialogState(
+                              () => localNotifyMinutesBefore = entry.value,
+                            ),
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 12, vertical: 6),
+                              decoration: BoxDecoration(
+                                color: selected
+                                    ? Colors.blue.shade50
+                                    : Colors.grey.shade50,
+                                borderRadius: BorderRadius.circular(20),
+                                border: Border.all(
+                                  color: selected
+                                      ? Colors.blue
+                                      : Colors.grey.shade300,
+                                  width: selected ? 1.5 : 1,
+                                ),
+                              ),
+                              child: Text(
+                                entry.key,
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: selected
+                                      ? FontWeight.bold
+                                      : FontWeight.normal,
+                                  color: selected
+                                      ? Colors.blue.shade800
+                                      : Colors.grey.shade700,
+                                ),
+                              ),
+                            ),
+                          );
+                        }).toList(),
+                      ),
+                      SizedBox(height: 14),
                       Row(
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
@@ -598,6 +653,7 @@ class _DailyViewState extends State<DailyView> {
                       subEvents: localSubEvents,
                       groupIds: localGroupIds,
                       repeatConfig: localRepeatConfig,
+                      notifyMinutesBefore: localNotifyMinutesBefore,
                     );
 
                     if (existingEvent == null) {
@@ -608,23 +664,24 @@ class _DailyViewState extends State<DailyView> {
                       );
                       if (targetIdx != -1) {
                         currentList.removeAt(targetIdx);
-                        currentList.insertAll(
-                            targetIdx,
-                            expandEventWithRepeat(
-                              Event(
-                                title: eventTitle.isNotEmpty
-                                    ? eventTitle
-                                    : 'Untitled Event',
-                                description: eventDesc,
-                                startTime: selectedStart,
-                                endTime: selectedEnd,
-                                color: selectedColor,
-                                columnBias: existingEvent.columnBias,
-                                subEvents: localSubEvents,
-                                groupIds: localGroupIds,
-                                repeatConfig: localRepeatConfig,
-                              ),
-                            ));
+                        final updatedInstances = expandEventWithRepeat(
+                          Event(
+                            id: existingEvent.id,
+                            title: eventTitle.isNotEmpty
+                                ? eventTitle
+                                : 'Untitled Event',
+                            description: eventDesc,
+                            startTime: selectedStart,
+                            endTime: selectedEnd,
+                            color: selectedColor,
+                            columnBias: existingEvent.columnBias,
+                            subEvents: localSubEvents,
+                            groupIds: localGroupIds,
+                            repeatConfig: localRepeatConfig,
+                            notifyMinutesBefore: localNotifyMinutesBefore,
+                          ),
+                        );
+                        currentList.insertAll(targetIdx, updatedInstances);
                       }
                     }
 

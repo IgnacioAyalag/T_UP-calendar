@@ -5,6 +5,7 @@ import '../models/task.dart';
 import '../models/group.dart';
 import '../helpers/general_helpers.dart';
 import '../helpers/storage_helper.dart';
+import '../helpers/notification_service.dart';
 import 'daily_view.dart';
 import 'tasks_page.dart';
 import 'calendar_page.dart';
@@ -28,6 +29,8 @@ class _MainAppAppState extends State<MainApp> {
   }
 
   Future<void> _loadFromDisk() async {
+    await NotificationService.instance.init();
+
     final loadedEvents = await StorageHelper.loadEvents();
     final loadedTasks = await StorageHelper.loadTasks();
     final loadedGroups = await StorageHelper.loadGroups();
@@ -40,20 +43,69 @@ class _MainAppAppState extends State<MainApp> {
     _groupsNotifier.value = loadedGroups;
 
     // Auto-save on every future change, from anywhere in the app
-    _eventsNotifier.addListener(() {
-      debugPrint('[Storage] Saving ${_eventsNotifier.value.length} events');
-      StorageHelper.saveEvents(_eventsNotifier.value);
-    });
-    _tasksNotifier.addListener(() {
-      debugPrint('[Storage] Saving ${_tasksNotifier.value.length} tasks');
-      StorageHelper.saveTasks(_tasksNotifier.value);
-    });
+    _previousEventIds = loadedEvents.map((e) => e.id).toSet();
+    _eventsNotifier.addListener(_onEventsChanged);
+    _tasksNotifier.addListener(_onTasksChanged);
     _groupsNotifier.addListener(() {
       debugPrint('[Storage] Saving ${_groupsNotifier.value.length} groups');
       StorageHelper.saveGroups(_groupsNotifier.value);
     });
 
+    // Re-schedule every saved event's reminder on startup, since scheduled
+    // OS-level alarms don't survive an app reinstall/data wipe and won't
+    // otherwise exist the first time this app version runs.
+    for (final event in loadedEvents) {
+      NotificationService.instance.scheduleEventReminder(event);
+    }
+
+    // Set up the persistent notification and run an initial expiring-soon
+    // check against whatever was already saved.
+    _onTasksChanged();
+
     if (mounted) setState(() => _isLoading = false);
+  }
+
+  // Tracks event ids from the previous snapshot so deleted events have
+  // their reminders cancelled, not just left scheduled forever.
+  Set<String> _previousEventIds = {};
+
+  void _onEventsChanged() {
+    final current = _eventsNotifier.value;
+    debugPrint('[Storage] Saving ${current.length} events');
+    StorageHelper.saveEvents(current);
+
+    final currentIds = current.map((e) => e.id).toSet();
+    final removedIds = _previousEventIds.difference(currentIds);
+    for (final id in removedIds) {
+      NotificationService.instance.cancelEventReminder(id);
+    }
+    // Re-schedule everything still present — cheap no-op for unchanged
+    // events (cancel+reschedule with the same data) and correctly picks up
+    // edits to the time or the reminder setting itself.
+    for (final event in current) {
+      NotificationService.instance.scheduleEventReminder(event);
+    }
+    _previousEventIds = currentIds;
+  }
+
+  void _onTasksChanged() {
+    debugPrint('[Storage] Saving ${_tasksNotifier.value.length} tasks');
+    StorageHelper.saveTasks(_tasksNotifier.value);
+
+    NotificationService.instance
+        .refreshPersistentDailyTasksNotification(_tasksNotifier.value);
+
+    NotificationService.instance
+        .checkExpiringSoonTasks(_tasksNotifier.value)
+        .then((notifiedIds) {
+      if (notifiedIds.isEmpty) return;
+      // Mark these tasks so the same alert doesn't fire again, then persist
+      // that flag (without re-triggering this same listener in a loop).
+      for (final task in _tasksNotifier.value) {
+        if (notifiedIds.contains(task.id)) task.expiringSoonNotified = true;
+      }
+      StorageHelper.saveTasks(_tasksNotifier.value);
+    });
   }
 
   @override
