@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_timezone/flutter_timezone.dart';
 import 'package:timezone/data/latest_all.dart' as tz;
@@ -62,6 +63,14 @@ class NotificationService {
         .resolvePlatformSpecificImplementation<
             AndroidFlutterLocalNotificationsPlugin>()
         ?.requestNotificationsPermission();
+    // Separate from notification permission: Android 12+ requires this
+    // dedicated "Alarms & reminders" grant before zonedSchedule(..., mode:
+    // exactAllowWhileIdle) will actually fire. Without it, exact reminders
+    // are silently dropped or throw exact_alarms_not_permitted.
+    await _plugin
+        .resolvePlatformSpecificImplementation<
+            AndroidFlutterLocalNotificationsPlugin>()
+        ?.requestExactAlarmsPermission();
     await _plugin
         .resolvePlatformSpecificImplementation<
             IOSFlutterLocalNotificationsPlugin>()
@@ -86,6 +95,17 @@ class NotificationService {
     final fireTime = event.startTime.subtract(Duration(minutes: minutesBefore));
     if (fireTime.isBefore(DateTime.now())) return; // don't schedule the past
 
+    // Exact scheduling requires a separate OS-level grant on Android 12+
+    // ("Alarms & reminders"). If it hasn't been granted, fall back to an
+    // inexact schedule rather than have the reminder silently never fire.
+    final androidImpl = _plugin.resolvePlatformSpecificImplementation<
+        AndroidFlutterLocalNotificationsPlugin>();
+    final canScheduleExact =
+        await androidImpl?.canScheduleExactNotifications() ?? true;
+    final scheduleMode = canScheduleExact
+        ? AndroidScheduleMode.exactAllowWhileIdle
+        : AndroidScheduleMode.inexactAllowWhileIdle;
+
     await _plugin.zonedSchedule(
       id: id,
       title: event.title.isEmpty ? 'Event reminder' : event.title,
@@ -101,7 +121,10 @@ class NotificationService {
         ),
         iOS: DarwinNotificationDetails(),
       ),
-      androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+      androidScheduleMode: scheduleMode,
+    );
+    debugPrint(
+      '[Notifications] Scheduled "${event.title}" reminder for $fireTime (exact: $canScheduleExact)',
     );
   }
 
