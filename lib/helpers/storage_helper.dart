@@ -10,6 +10,19 @@ class StorageHelper {
   static const String _tasksKey = 'saved_calendar_tasks';
   static const String _groupsKey = 'saved_calendar_groups';
   static const String _taskViewsKey = 'saved_calendar_task_views';
+  static const String _homeCardOrderKey = 'saved_home_card_order';
+
+  // Save/Load the order of cards on the home screen (a simple list of ids).
+  static Future<void> saveHomeCardOrder(List<String> order) async {
+    final prefs = await SharedPreferences.getInstance();
+    final ok = await prefs.setStringList(_homeCardOrderKey, order);
+    debugPrint('[StorageHelper] saveHomeCardOrder($order) -> $ok');
+  }
+
+  static Future<List<String>?> loadHomeCardOrder() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getStringList(_homeCardOrderKey);
+  }
 
   // Save/Load the home screen's custom task-card views (raw JSON maps,
   // since the view model lives in home_page.dart, not models/).

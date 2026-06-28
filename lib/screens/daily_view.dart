@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
 import '../models/event.dart';
 import '../models/task.dart';
@@ -2022,24 +2023,31 @@ class _DailyViewState extends State<DailyView> {
                                                                           event
                                                                               .endTime,
                                                                         )) {
-                                                                  sub.startTime =
-                                                                      sub.startTime
-                                                                          .add(
-                                                                    shift,
-                                                                  );
-                                                                  sub.endTime =
-                                                                      sub.endTime
-                                                                          .add(
-                                                                    shift,
-                                                                  );
-                                                                  widget.eventsNotifier
-                                                                          .value =
-                                                                      List.from(
-                                                                    widget
-                                                                        .eventsNotifier
-                                                                        .value,
-                                                                  );
+                                                                  setState(() {
+                                                                    sub.startTime = sub
+                                                                        .startTime
+                                                                        .add(
+                                                                      shift,
+                                                                    );
+                                                                    sub.endTime = sub
+                                                                        .endTime
+                                                                        .add(
+                                                                      shift,
+                                                                    );
+                                                                  });
                                                                 }
+                                                              },
+                                                              onVerticalDragEnd:
+                                                                  (_) {
+                                                                widget.eventsNotifier
+                                                                        .value =
+                                                                    List.from(
+                                                                  widget
+                                                                      .eventsNotifier
+                                                                      .value,
+                                                                );
+                                                                HapticFeedback
+                                                                    .lightImpact();
                                                               },
                                                               child: Padding(
                                                                 padding:
@@ -2120,16 +2128,23 @@ class _DailyViewState extends State<DailyView> {
                                                                       event
                                                                           .startTime,
                                                                     )) {
-                                                                  sub.startTime =
-                                                                      proposedStart;
-                                                                  widget.eventsNotifier
-                                                                          .value =
-                                                                      List.from(
-                                                                    widget
-                                                                        .eventsNotifier
-                                                                        .value,
-                                                                  );
+                                                                  setState(() {
+                                                                    sub.startTime =
+                                                                        proposedStart;
+                                                                  });
                                                                 }
+                                                              },
+                                                              onVerticalDragEnd:
+                                                                  (_) {
+                                                                widget.eventsNotifier
+                                                                        .value =
+                                                                    List.from(
+                                                                  widget
+                                                                      .eventsNotifier
+                                                                      .value,
+                                                                );
+                                                                HapticFeedback
+                                                                    .lightImpact();
                                                               },
                                                               child: Container(
                                                                 color: Colors
@@ -2179,16 +2194,23 @@ class _DailyViewState extends State<DailyView> {
                                                                       event
                                                                           .endTime,
                                                                     )) {
-                                                                  sub.endTime =
-                                                                      proposedEnd;
-                                                                  widget.eventsNotifier
-                                                                          .value =
-                                                                      List.from(
-                                                                    widget
-                                                                        .eventsNotifier
-                                                                        .value,
-                                                                  );
+                                                                  setState(() {
+                                                                    sub.endTime =
+                                                                        proposedEnd;
+                                                                  });
                                                                 }
+                                                              },
+                                                              onVerticalDragEnd:
+                                                                  (_) {
+                                                                widget.eventsNotifier
+                                                                        .value =
+                                                                    List.from(
+                                                                  widget
+                                                                      .eventsNotifier
+                                                                      .value,
+                                                                );
+                                                                HapticFeedback
+                                                                    .lightImpact();
                                                               },
                                                               child: Container(
                                                                 color: Colors
@@ -2280,10 +2302,23 @@ class _DailyViewState extends State<DailyView> {
                                                           widthPerColumn;
                                                 }
 
+                                                // Repaint this widget locally
+                                                // while dragging — committing
+                                                // to eventsNotifier on every
+                                                // frame would trigger a save
+                                                // to disk and a full
+                                                // notification reschedule
+                                                // dozens of times per second.
+                                                setState(() {});
+                                              },
+                                              onPanEnd: (_) {
+                                                // Commit once, after the
+                                                // gesture finishes.
                                                 widget.eventsNotifier.value =
                                                     List.from(
                                                   widget.eventsNotifier.value,
                                                 );
+                                                HapticFeedback.lightImpact();
                                               },
                                               child: Container(
                                                 color: Colors.transparent,
@@ -2335,12 +2370,18 @@ class _DailyViewState extends State<DailyView> {
                                                   ) &&
                                                   proposedStart
                                                       .isAfter(startOfDay)) {
-                                                event.startTime = proposedStart;
-                                                widget.eventsNotifier.value =
-                                                    List.from(
-                                                  widget.eventsNotifier.value,
-                                                );
+                                                setState(() {
+                                                  event.startTime =
+                                                      proposedStart;
+                                                });
                                               }
+                                            },
+                                            onVerticalDragEnd: (_) {
+                                              widget.eventsNotifier.value =
+                                                  List.from(
+                                                widget.eventsNotifier.value,
+                                              );
+                                              HapticFeedback.lightImpact();
                                             },
                                             child: Container(
                                               color: Colors.transparent,
@@ -2372,12 +2413,17 @@ class _DailyViewState extends State<DailyView> {
                                                   ) &&
                                                   proposedEnd
                                                       .isBefore(endOfDay)) {
-                                                event.endTime = proposedEnd;
-                                                widget.eventsNotifier.value =
-                                                    List.from(
-                                                  widget.eventsNotifier.value,
-                                                );
+                                                setState(() {
+                                                  event.endTime = proposedEnd;
+                                                });
                                               }
+                                            },
+                                            onVerticalDragEnd: (_) {
+                                              widget.eventsNotifier.value =
+                                                  List.from(
+                                                widget.eventsNotifier.value,
+                                              );
+                                              HapticFeedback.lightImpact();
                                             },
                                             child: Container(
                                               color: Colors.transparent,

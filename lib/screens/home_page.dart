@@ -1,4 +1,6 @@
+import 'dart:math';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
 import '../models/event.dart';
 import '../models/task.dart';
@@ -188,15 +190,166 @@ const _cardShape =
 TextStyle _sectionLabel() => TextStyle(
     fontSize: 13, fontWeight: FontWeight.w600, color: Colors.grey.shade700);
 
+// Generic, encouraging phrases shown when there isn't enough history yet, or
+// when the real stats available right now aren't flattering.
+const _genericPrompts = [
+  "What's the plan?",
+  'Ready to get things done?',
+  'Writing down your tasks makes you more likely to finish them.',
+  'One step at a time.',
+  "Let's make today count.",
+  'A clear plan beats a full memory.',
+  'Small tasks add up to big progress.',
+];
+
+// Builds the one-line welcome message under the greeting: a real, flattering
+// stat about past usage when one is available, otherwise a generic prompt.
+// Picked fresh on every call (the caller decides when that happens).
+String _buildWelcomeMessage(List<Task> tasks, List<Event> events) {
+  final now = DateTime.now();
+  final todayStart = DateTime(now.year, now.month, now.day);
+  final todayEnd = todayStart.add(const Duration(days: 1));
+  final weekFromNow = todayStart.add(const Duration(days: 7));
+
+  final candidates = <String>[];
+
+  // Candidate: an event today or within the next week.
+  final upcoming = events
+      .where(
+          (e) => e.startTime.isAfter(now) && e.startTime.isBefore(weekFromNow))
+      .toList()
+    ..sort((a, b) => a.startTime.compareTo(b.startTime));
+  if (upcoming.isNotEmpty) {
+    final next = upcoming.first;
+    final isToday = !next.startTime.isBefore(todayStart) &&
+        next.startTime.isBefore(todayEnd);
+    final whenLabel =
+        isToday ? 'today' : 'this ${DateFormat('EEEE').format(next.startTime)}';
+    final title = next.title.isEmpty ? 'an event' : next.title;
+    candidates.add("Don't forget you have $title $whenLabel.");
+  }
+
+  // Candidate: total completed task count — only worth bragging about above 0.
+  final completedCount = tasks.where((t) => t.isCompleted).length;
+  if (completedCount > 0) {
+    candidates.add(completedCount == 1
+        ? "You've completed 1 task already."
+        : "You've completed $completedCount tasks already.");
+  }
+
+  // Candidate: on-time completion rate — only shown when it's actually a good
+  // look (a flattering percentage, with enough of a sample to mean something).
+  final completedWithDueDate = tasks
+      .where(
+          (t) => t.isCompleted && t.endDate != null && t.completedDate != null)
+      .toList();
+  if (completedWithDueDate.length >= 3) {
+    final onTime = completedWithDueDate
+        .where((t) => !t.completedDate!.isAfter(t.endDate!))
+        .length;
+    final pct = (onTime / completedWithDueDate.length * 100).round();
+    if (pct >= 50) {
+      candidates.add('$pct% of your tasks are done on time.');
+    }
+  }
+
+  if (candidates.isEmpty) {
+    return _genericPrompts[Random().nextInt(_genericPrompts.length)];
+  }
+  return candidates[Random().nextInt(candidates.length)];
+}
+
+// One day's worth of activity for the heatmap: how many tasks were completed
+// that day, and how many events started that day.
+class _DayActivity {
+  final DateTime day;
+  final int tasksCompleted;
+  final int eventsHeld;
+  _DayActivity(this.day, this.tasksCompleted, this.eventsHeld);
+  int get total => tasksCompleted + eventsHeld;
+}
+
+// Builds the last 30 days (oldest first, today last) with their activity
+// counts, for the GitHub-style heatmap card.
+List<_DayActivity> _buildActivityHistory(List<Task> tasks, List<Event> events) {
+  final now = DateTime.now();
+  final todayStart = DateTime(now.year, now.month, now.day);
+
+  return List.generate(30, (i) {
+    final day = todayStart.subtract(Duration(days: 29 - i));
+    final dayEnd = day.add(const Duration(days: 1));
+
+    final tasksCompleted = tasks.where((t) {
+      final cd = t.completedDate;
+      return cd != null && !cd.isBefore(day) && cd.isBefore(dayEnd);
+    }).length;
+
+    final eventsHeld = events
+        .where(
+            (e) => !e.startTime.isBefore(day) && e.startTime.isBefore(dayEnd))
+        .length;
+
+    return _DayActivity(day, tasksCompleted, eventsHeld);
+  });
+}
+
+// Maps an activity count to one of 5 intensity buckets (0 = none, 4 = most
+// active), the same way GitHub's contribution graph buckets commit counts
+// rather than using a literal continuous gradient.
+int _heatmapBucket(int count, int maxCount) {
+  if (count == 0 || maxCount == 0) return 0;
+  final ratio = count / maxCount;
+  if (ratio <= 0.25) return 1;
+  if (ratio <= 0.5) return 2;
+  if (ratio <= 0.75) return 3;
+  return 4;
+}
+
+// Uses the app's own theme color (Colors.blue) instead of an unrelated
+// palette, scaling from a light tint (barely active) to the full theme
+// blue (most active that day).
+Color _heatmapColor(int bucket) {
+  final colors = [
+    Color(0xFFEBEDF0), // none
+    Colors.blue.shade100,
+    Colors.blue.shade300,
+    Colors.blue.shade500,
+    Colors.blue.shade700,
+  ];
+  return colors[bucket];
+}
+
 class _HomePageState extends State<HomePage> {
   final List<_TaskCardView> _customViews = [];
   final _taskPageController = PageController();
   int _currentTaskPage = 0;
 
+  // Which cards appear in the body, and in what order. Defaults to the
+  // original order; loaded from storage if the user has rearranged before.
+  List<String> _cardOrder = ['heatmap', 'day', 'tasks'];
+  bool _editingLayout = false;
+
   @override
   void initState() {
     super.initState();
     _loadCustomViews();
+    _loadCardOrder();
+  }
+
+  Future<void> _loadCardOrder() async {
+    final saved = await StorageHelper.loadHomeCardOrder();
+    if (!mounted || saved == null) return;
+    // Guard against a stale saved order (e.g. from an older app version)
+    // missing a card id or containing an unknown one — fall back to default
+    // rather than silently dropping a card from the screen.
+    final isValid = saved.length == _cardOrder.length &&
+        saved.toSet().containsAll(_cardOrder);
+    if (!isValid) return;
+    setState(() => _cardOrder = saved);
+  }
+
+  void _saveCardOrder() {
+    StorageHelper.saveHomeCardOrder(_cardOrder);
   }
 
   Future<void> _loadCustomViews() async {
@@ -545,36 +698,358 @@ class _HomePageState extends State<HomePage> {
     VoidCallback? onClose,
     bool highlighted = false,
   }) {
+    final shape = highlighted
+        ? RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16),
+            side: BorderSide(color: Colors.blue.shade100),
+          )
+        : _cardShape;
+
+    final cardContent = onClose == null
+        ? Padding(padding: const EdgeInsets.all(24.0), child: child)
+        : Stack(children: [
+            Padding(padding: const EdgeInsets.all(24.0), child: child),
+            Positioned(
+              top: 4,
+              right: 4,
+              child: GestureDetector(
+                onTap: () {
+                  HapticFeedback.lightImpact();
+                  onClose();
+                },
+                child: Padding(
+                  padding: const EdgeInsets.all(6.0),
+                  child:
+                      Icon(Icons.close, size: 16, color: Colors.grey.shade400),
+                ),
+              ),
+            ),
+          ]);
+
     final card = Card(
       elevation: 2,
       color: highlighted ? Colors.blue.shade50 : null,
-      shape: highlighted
-          ? RoundedRectangleBorder(
+      shape: shape,
+      clipBehavior: Clip.antiAlias,
+      child: onTap == null
+          ? cardContent
+          : InkWell(
               borderRadius: BorderRadius.circular(16),
-              side: BorderSide(color: Colors.blue.shade100),
-            )
-          : _cardShape,
-      child: onClose == null
-          ? Padding(padding: const EdgeInsets.all(24.0), child: child)
-          : Stack(children: [
-              Padding(padding: const EdgeInsets.all(24.0), child: child),
-              Positioned(
-                top: 4,
-                right: 4,
-                child: GestureDetector(
-                  onTap: onClose,
-                  child: Padding(
-                    padding: const EdgeInsets.all(6.0),
-                    child: Icon(Icons.close,
-                        size: 16, color: Colors.grey.shade400),
-                  ),
-                ),
-              ),
-            ]),
+              onTap: () {
+                HapticFeedback.selectionClick();
+                onTap();
+              },
+              child: cardContent,
+            ),
     );
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 4),
-      child: onTap == null ? card : GestureDetector(onTap: onTap, child: card),
+      child: card,
+    );
+  }
+
+  Widget _buildActivityHeatmapCard() {
+    return ValueListenableBuilder<List<Task>>(
+      valueListenable: widget.tasksNotifier,
+      builder: (context, tasks, _) {
+        return ValueListenableBuilder<List<Event>>(
+          valueListenable: widget.eventsNotifier,
+          builder: (context, events, __) {
+            final history = _buildActivityHistory(tasks, events);
+            final maxCount =
+                history.fold<int>(0, (m, d) => d.total > m ? d.total : m);
+
+            const columns = 10;
+            final rows = List.generate(
+                3, (r) => history.sublist(r * columns, r * columns + columns));
+
+            return _activityHeatmapCardBody(history, maxCount, rows);
+          },
+        );
+      },
+    );
+  }
+
+  Widget _activityHeatmapCardBody(
+      List<_DayActivity> history, int maxCount, List<List<_DayActivity>> rows) {
+    return Card(
+      elevation: 2,
+      shape: _cardShape,
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(16),
+        onTap: () {
+          HapticFeedback.selectionClick();
+          _showActivityHeatmapDialog(history, maxCount);
+        },
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      'Last 30 days',
+                      style: TextStyle(
+                          fontSize: 11,
+                          color: Colors.grey.shade500,
+                          fontWeight: FontWeight.w600),
+                    ),
+                    SizedBox(height: 10),
+                    ...rows.map((week) => Padding(
+                          padding: const EdgeInsets.only(bottom: 4),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: week
+                                .map((d) => Padding(
+                                      padding: const EdgeInsets.only(right: 3),
+                                      child: Container(
+                                        width: 12,
+                                        height: 12,
+                                        decoration: BoxDecoration(
+                                          color: _heatmapColor(_heatmapBucket(
+                                              d.total, maxCount)),
+                                          borderRadius:
+                                              BorderRadius.circular(2.5),
+                                        ),
+                                      ),
+                                    ))
+                                .toList(),
+                          ),
+                        )),
+                  ],
+                ),
+              ),
+              SizedBox(width: 8),
+              Icon(Icons.chevron_right, size: 18, color: Colors.grey.shade400),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _showActivityHeatmapDialog(List<_DayActivity> history, int maxCount) {
+    showDialog(
+      context: context,
+      builder: (ctx) {
+        _DayActivity? selected = history.last;
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            return Dialog(
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(20)),
+              child: Padding(
+                padding: const EdgeInsets.all(20),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('Activity',
+                        style: TextStyle(
+                            fontSize: 18, fontWeight: FontWeight.bold)),
+                    SizedBox(height: 4),
+                    Text('Last 30 days — tap a day for details',
+                        style: TextStyle(
+                            fontSize: 12, color: Colors.grey.shade500)),
+                    SizedBox(height: 16),
+                    Wrap(
+                      spacing: 5,
+                      runSpacing: 5,
+                      children: history.map((d) {
+                        final isSelected = selected?.day == d.day;
+                        return GestureDetector(
+                          onTap: () => setDialogState(() => selected = d),
+                          child: Container(
+                            width: 22,
+                            height: 22,
+                            decoration: BoxDecoration(
+                              color: _heatmapColor(
+                                  _heatmapBucket(d.total, maxCount)),
+                              borderRadius: BorderRadius.circular(4),
+                              border: isSelected
+                                  ? Border.all(
+                                      color: Colors.blueAccent, width: 2)
+                                  : null,
+                            ),
+                          ),
+                        );
+                      }).toList(),
+                    ),
+                    SizedBox(height: 18),
+                    if (selected != null)
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.all(14),
+                        decoration: BoxDecoration(
+                          color: Colors.grey.shade50,
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              DateFormat('EEEE, MMMM d').format(selected!.day),
+                              style: TextStyle(
+                                  fontWeight: FontWeight.bold, fontSize: 14),
+                            ),
+                            SizedBox(height: 6),
+                            Text(
+                              selected!.total == 0
+                                  ? 'Nothing done this day.'
+                                  : '${selected!.tasksCompleted} task${selected!.tasksCompleted == 1 ? '' : 's'} completed · ${selected!.eventsHeld} event${selected!.eventsHeld == 1 ? '' : 's'}',
+                              style: TextStyle(
+                                  fontSize: 13, color: Colors.grey.shade700),
+                            ),
+                          ],
+                        ),
+                      ),
+                    SizedBox(height: 16),
+                    Align(
+                      alignment: Alignment.centerRight,
+                      child: TextButton(
+                        onPressed: () => Navigator.pop(ctx),
+                        child: Text('Close'),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Widget _buildDayCard(DateTime now) {
+    return Card(
+      elevation: 2,
+      shape: _cardShape,
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(16),
+        onTap: () {
+          HapticFeedback.selectionClick();
+          Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (_) => DailyView(
+                currentDate: now,
+                eventsNotifier: widget.eventsNotifier,
+                tasksNotifier: widget.tasksNotifier,
+                groupsNotifier: widget.groupsNotifier,
+              ),
+            ),
+          ).then((_) => setState(() {}));
+        },
+        child: Padding(
+          padding: const EdgeInsets.all(32.0),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            Text(DateFormat('EEEE').format(now),
+                style: TextStyle(
+                    fontSize: 32,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.blue)),
+            SizedBox(height: 8),
+            Text(DateFormat('MMMM d, yyyy').format(now),
+                style: TextStyle(fontSize: 18, color: Colors.grey.shade600)),
+            SizedBox(height: 8),
+            Text("Tap to open today's schedule",
+                style: TextStyle(fontSize: 12, color: Colors.grey.shade400)),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTasksCard(DateTime now, DateTime todayStart, int pageCount) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        SizedBox(
+          height: 230,
+          child: ValueListenableBuilder<List<Task>>(
+            valueListenable: widget.tasksNotifier,
+            builder: (context, currentTasks, _) {
+              final visibleTasks = currentTasks
+                  .where((t) =>
+                      isItemVisible(t.groupIds, widget.groupsNotifier.value))
+                  .toList();
+
+              return PageView.builder(
+                controller: _taskPageController,
+                onPageChanged: (i) => setState(() => _currentTaskPage = i),
+                itemCount: pageCount,
+                itemBuilder: (context, pageIndex) {
+                  if (pageIndex == pageCount - 1) {
+                    return _pageCard(
+                      onTap: _openAddViewSheet,
+                      highlighted: true,
+                      child: Center(
+                        child:
+                            Column(mainAxisSize: MainAxisSize.min, children: [
+                          Icon(Icons.add_circle_outline,
+                              size: 28, color: Colors.blue),
+                          SizedBox(height: 8),
+                          Text('+ add new view',
+                              style: TextStyle(
+                                  color: Colors.blue.shade700,
+                                  fontWeight: FontWeight.w600,
+                                  fontSize: 14)),
+                        ]),
+                      ),
+                    );
+                  }
+
+                  if (pageIndex == 0) {
+                    return _pageCard(
+                      onTap: _openTasksPage,
+                      child: _taskCardBody(
+                          'My Tasks', visibleTasks, now, todayStart),
+                    );
+                  }
+
+                  final view = _customViews[pageIndex - 1];
+                  return _pageCard(
+                    onTap: _openTasksPage,
+                    onClose: () {
+                      setState(() => _customViews.removeAt(pageIndex - 1));
+                      _saveCustomViews();
+                    },
+                    child: _taskCardBody(
+                      _viewLabel(view),
+                      visibleTasks.where(view.matches).toList(),
+                      now,
+                      todayStart,
+                    ),
+                  );
+                },
+              );
+            },
+          ),
+        ),
+        SizedBox(height: 8),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: List.generate(pageCount, (i) {
+            final active = i == _currentTaskPage;
+            return Container(
+              margin: EdgeInsets.symmetric(horizontal: 3),
+              width: active ? 8 : 6,
+              height: active ? 8 : 6,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: active ? Colors.blue : Colors.grey.shade300,
+              ),
+            );
+          }),
+        ),
+      ],
     );
   }
 
@@ -592,6 +1067,11 @@ class _HomePageState extends State<HomePage> {
         elevation: 0,
         actions: [
           IconButton(
+            icon: Icon(_editingLayout ? Icons.check : Icons.swap_vert),
+            tooltip: _editingLayout ? 'Done arranging' : 'Rearrange cards',
+            onPressed: () => setState(() => _editingLayout = !_editingLayout),
+          ),
+          IconButton(
             icon: Icon(Icons.add_circle_outline),
             tooltip: 'Create category',
             onPressed: () => showInlineGroupCreator(
@@ -606,125 +1086,93 @@ class _HomePageState extends State<HomePage> {
         ],
       ),
       body: Padding(
-        padding: const EdgeInsets.all(16.0),
+        padding: const EdgeInsets.fromLTRB(20, 20, 20, 16),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
-          mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            GestureDetector(
-              onTap: () => Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (_) => DailyView(
-                    currentDate: now,
-                    eventsNotifier: widget.eventsNotifier,
-                    tasksNotifier: widget.tasksNotifier,
-                    groupsNotifier: widget.groupsNotifier,
-                  ),
-                ),
-              ).then((_) => setState(() {})),
-              child: Card(
-                elevation: 2,
-                shape: _cardShape,
-                child: Padding(
-                  padding: const EdgeInsets.all(32.0),
-                  child: Column(mainAxisSize: MainAxisSize.min, children: [
-                    Text(DateFormat('EEEE').format(now),
-                        style: TextStyle(
-                            fontSize: 32,
-                            fontWeight: FontWeight.bold,
-                            color: Colors.blue)),
-                    SizedBox(height: 8),
-                    Text(DateFormat('MMMM d, yyyy').format(now),
-                        style: TextStyle(
-                            fontSize: 18, color: Colors.grey.shade600)),
-                    SizedBox(height: 8),
-                    Text("Tap to open today's schedule",
-                        style: TextStyle(
-                            fontSize: 12, color: Colors.grey.shade400)),
-                  ]),
-                ),
-              ),
-            ),
-            SizedBox(height: 24),
-            SizedBox(
-              height: 230,
-              child: ValueListenableBuilder<List<Task>>(
-                valueListenable: widget.tasksNotifier,
-                builder: (context, currentTasks, _) {
-                  final visibleTasks = currentTasks
-                      .where((t) => isItemVisible(
-                          t.groupIds, widget.groupsNotifier.value))
-                      .toList();
-
-                  return PageView.builder(
-                    controller: _taskPageController,
-                    onPageChanged: (i) => setState(() => _currentTaskPage = i),
-                    itemCount: pageCount,
-                    itemBuilder: (context, pageIndex) {
-                      if (pageIndex == pageCount - 1) {
-                        return _pageCard(
-                          onTap: _openAddViewSheet,
-                          highlighted: true,
-                          child: Center(
-                            child: Column(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Icon(Icons.add_circle_outline,
-                                      size: 28, color: Colors.blue),
-                                  SizedBox(height: 8),
-                                  Text('+ add new view',
-                                      style: TextStyle(
-                                          color: Colors.blue.shade700,
-                                          fontWeight: FontWeight.w600,
-                                          fontSize: 14)),
-                                ]),
-                          ),
-                        );
-                      }
-
-                      if (pageIndex == 0) {
-                        return _pageCard(
-                          onTap: _openTasksPage,
-                          child: _taskCardBody(
-                              'My Tasks', visibleTasks, now, todayStart),
-                        );
-                      }
-
-                      final view = _customViews[pageIndex - 1];
-                      return _pageCard(
-                        onTap: _openTasksPage,
-                        onClose: () {
-                          setState(() => _customViews.removeAt(pageIndex - 1));
-                          _saveCustomViews();
-                        },
-                        child: _taskCardBody(
-                          _viewLabel(view),
-                          visibleTasks.where(view.matches).toList(),
-                          now,
-                          todayStart,
-                        ),
-                      );
-                    },
-                  );
-                },
+            Text(
+              'Welcome back!',
+              style: TextStyle(
+                fontSize: 30,
+                fontWeight: FontWeight.bold,
+                color: Colors.grey.shade900,
+                height: 1.1,
               ),
             ),
             SizedBox(height: 8),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: List.generate(pageCount, (i) {
-                final active = i == _currentTaskPage;
-                return Container(
-                  margin: EdgeInsets.symmetric(horizontal: 3),
-                  width: active ? 8 : 6,
-                  height: active ? 8 : 6,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: active ? Colors.blue : Colors.grey.shade300,
-                  ),
-                );
-              }),
+            Text(
+              _buildWelcomeMessage(
+                  widget.tasksNotifier.value, widget.eventsNotifier.value),
+              style: TextStyle(
+                fontSize: 17,
+                color: Colors.grey.shade700,
+                height: 1.3,
+              ),
+            ),
+            if (_editingLayout) ...[
+              SizedBox(height: 10),
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                decoration: BoxDecoration(
+                  color: Colors.blue.shade50,
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Row(
+                  children: [
+                    Icon(Icons.info_outline,
+                        size: 16, color: Colors.blue.shade700),
+                    SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'Drag cards to reorder them.',
+                        style: TextStyle(
+                            fontSize: 12, color: Colors.blue.shade700),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+            SizedBox(height: 14),
+            Expanded(
+              child: _editingLayout
+                  ? ReorderableListView(
+                      buildDefaultDragHandles: false,
+                      onReorder: (oldIndex, newIndex) {
+                        if (newIndex > oldIndex) newIndex -= 1;
+                        setState(() {
+                          final id = _cardOrder.removeAt(oldIndex);
+                          _cardOrder.insert(newIndex, id);
+                        });
+                        _saveCardOrder();
+                        HapticFeedback.mediumImpact();
+                      },
+                      children: _cardOrder
+                          .map((id) => Padding(
+                                key: ValueKey(id),
+                                padding: const EdgeInsets.only(bottom: 14),
+                                child: ReorderableDragStartListener(
+                                  index: _cardOrder.indexOf(id),
+                                  child: AbsorbPointer(
+                                    child: _buildCardById(
+                                        id, now, todayStart, pageCount),
+                                  ),
+                                ),
+                              ))
+                          .toList(),
+                    )
+                  : Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: _cardOrder
+                          .map((id) => Padding(
+                                padding: const EdgeInsets.only(bottom: 14),
+                                child: _buildCardById(
+                                    id, now, todayStart, pageCount),
+                              ))
+                          .toList(),
+                    ),
             ),
           ],
         ),
@@ -744,5 +1192,19 @@ class _HomePageState extends State<HomePage> {
         child: Icon(Icons.calendar_today),
       ),
     );
+  }
+
+  Widget _buildCardById(
+      String id, DateTime now, DateTime todayStart, int pageCount) {
+    switch (id) {
+      case 'heatmap':
+        return _buildActivityHeatmapCard();
+      case 'day':
+        return _buildDayCard(now);
+      case 'tasks':
+        return _buildTasksCard(now, todayStart, pageCount);
+      default:
+        return const SizedBox.shrink();
+    }
   }
 }

@@ -1,5 +1,6 @@
 import 'package:T_UP/widgets/group_sheets.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
 import '../models/task.dart';
 import '../models/group.dart';
@@ -760,6 +761,11 @@ class _TasksPageState extends State<TasksPage> {
       updatedList[idx].isCompleted = nextState;
       updatedList[idx].completedDate = nextState ? DateTime.now() : null;
       widget.tasksNotifier.value = getSortedTasks(updatedList);
+      if (nextState) {
+        HapticFeedback.mediumImpact();
+      } else {
+        HapticFeedback.selectionClick();
+      }
     }
   }
 
@@ -767,6 +773,7 @@ class _TasksPageState extends State<TasksPage> {
     final updatedList = List<Task>.from(widget.tasksNotifier.value);
     updatedList.remove(task);
     widget.tasksNotifier.value = updatedList;
+    HapticFeedback.mediumImpact();
   }
 
   @override
