@@ -13,6 +13,7 @@ import '../widgets/group_sheets.dart';
 import '../widgets/color_picker.dart';
 import '../widgets/pulsating_effects.dart';
 import '../widgets/hour_grid_painter.dart';
+import 'week_view.dart';
 
 // --- DAILY VIEW ---
 
@@ -98,10 +99,17 @@ class _DailyViewState extends State<DailyView> {
   int _activeHorizontalTab = 0;
   double _horizontalDragRemainder = 0.0;
   double _hourHeight = 85.0;
+  static const double _minHourHeight = 18.0;
+  static const double _maxHourHeight = 320.0;
+  double? _scaleGestureStartHourHeight;
+  double? _scaleGestureStartScrollOffset;
+  double? _scaleGestureFocalDy;
+  bool _navigatingToWeek = false;
 
   static const int _timelineDays = 365 * 20;
   static const int _initialDayIndex = _timelineDays ~/ 2;
-  double get _timelineDayExtent => _hourHeight * 24;
+  static const double _dayHeaderHeight = 34.0;
+  double get _timelineDayExtent => _dayHeaderHeight + (_hourHeight * 24);
   static const double _leftPillarWidth = 70.0;
 
   final TextEditingController _subEventTitleCtrl = TextEditingController();
@@ -928,6 +936,88 @@ class _DailyViewState extends State<DailyView> {
     }
   }
 
+  // --- Long-press-then-drag zoom on the timeline --------------------------
+  // Pinch-to-zoom doesn't reliably work on a scrolling ListView (the list's
+  // own scroll gesture wins the gesture arena before a pinch is recognized).
+  // Long-press is a clean, unambiguous gesture instead: hold for ~0.5s (a
+  // haptic confirms zoom mode is active), then drag in any direction to
+  // resize the timeline — drag right/up to zoom in, left/down to zoom out.
+  // Keeps whatever time was under the finger steady on screen.
+
+  void _onTimelineLongPressStart(LongPressStartDetails details) {
+    HapticFeedback.mediumImpact();
+    _scaleGestureStartHourHeight = _hourHeight;
+    _scaleGestureStartScrollOffset =
+        _scrollController.hasClients ? _scrollController.offset : 0.0;
+    _scaleGestureFocalDy = details.localPosition.dy;
+  }
+
+  void _onTimelineLongPressMoveUpdate(LongPressMoveUpdateDetails details) {
+    if (_scaleGestureStartHourHeight == null) return;
+
+    final startHourHeight = _scaleGestureStartHourHeight!;
+    final startOffset = _scaleGestureStartScrollOffset!;
+    final focalDy = _scaleGestureFocalDy!;
+
+    // Use whichever axis moved further, so either a horizontal or a
+    // vertical drag works — about 150px of drag spans the full zoom range.
+    final delta = details.offsetFromOrigin;
+    final dominant = delta.dx.abs() > delta.dy.abs() ? delta.dx : -delta.dy;
+    final zoomFactor = 1 + (dominant / 150);
+    final rawHourHeight = startHourHeight * zoomFactor;
+
+    // Already fully zoomed out and still dragging further out (past what
+    // the clamp would otherwise show) — the user wants to see even more
+    // context than a single day offers, so escalate to Week view.
+    if (rawHourHeight < _minHourHeight - 40) {
+      _zoomToWeek();
+      return;
+    }
+
+    final newHourHeight = rawHourHeight.clamp(_minHourHeight, _maxHourHeight);
+    if (newHourHeight == _hourHeight) return;
+
+    final scaleRatio = newHourHeight / startHourHeight;
+    final newOffset = (startOffset + focalDy) * scaleRatio - focalDy;
+
+    setState(() {
+      _hourHeight = newHourHeight;
+    });
+
+    if (_scrollController.hasClients) {
+      _scrollController.jumpTo(
+        newOffset.clamp(0.0, _scrollController.position.maxScrollExtent),
+      );
+    }
+  }
+
+  void _onTimelineLongPressEnd(LongPressEndDetails details) {
+    _scaleGestureStartHourHeight = null;
+    _scaleGestureStartScrollOffset = null;
+    _scaleGestureFocalDy = null;
+    HapticFeedback.selectionClick();
+  }
+
+  void _zoomToWeek() {
+    if (_navigatingToWeek) return;
+    _navigatingToWeek = true;
+    _scaleGestureStartHourHeight = null;
+    _scaleGestureStartScrollOffset = null;
+    _scaleGestureFocalDy = null;
+    HapticFeedback.mediumImpact();
+    Navigator.pushReplacement(
+      context,
+      MaterialPageRoute(
+        builder: (_) => WeekView(
+          initialDate: _visibleDate,
+          eventsNotifier: widget.eventsNotifier,
+          tasksNotifier: widget.tasksNotifier,
+          groupsNotifier: widget.groupsNotifier,
+        ),
+      ),
+    );
+  }
+
   Widget _buildTopSegmentTabs() {
     return Container(
       color: Colors.white,
@@ -1626,6 +1716,11 @@ class _DailyViewState extends State<DailyView> {
         ),
         actions: [
           IconButton(
+            icon: Icon(Icons.calendar_view_week),
+            tooltip: 'Week view',
+            onPressed: _zoomToWeek,
+          ),
+          IconButton(
             icon: Icon(Icons.add),
             tooltip: 'Add event',
             onPressed: () => _openEventEditor(targetDay: _visibleDate),
@@ -1666,654 +1761,835 @@ class _DailyViewState extends State<DailyView> {
                         )
                         .toList();
 
-                    return ListView.builder(
-                      controller: _scrollController,
-                      itemExtent: _timelineDayExtent,
-                      itemCount: daysList.length,
-                      itemBuilder: (context, dayIndexOffset) {
-                        final currentDayOffset = daysList[dayIndexOffset];
-                        final dayDateTime = _timelineBaseDate.add(
-                          Duration(days: currentDayOffset),
-                        );
+                    return GestureDetector(
+                      onLongPressStart: _onTimelineLongPressStart,
+                      onLongPressMoveUpdate: _onTimelineLongPressMoveUpdate,
+                      onLongPressEnd: _onTimelineLongPressEnd,
+                      child: ListView.builder(
+                        controller: _scrollController,
+                        itemExtent: _timelineDayExtent,
+                        itemCount: daysList.length,
+                        itemBuilder: (context, dayIndexOffset) {
+                          final currentDayOffset = daysList[dayIndexOffset];
+                          final dayDateTime = _timelineBaseDate.add(
+                            Duration(days: currentDayOffset),
+                          );
 
-                        final startOfDay = DateTime(
-                          dayDateTime.year,
-                          dayDateTime.month,
-                          dayDateTime.day,
-                        );
-                        final endOfDay = startOfDay.add(Duration(days: 1));
+                          final startOfDay = DateTime(
+                            dayDateTime.year,
+                            dayDateTime.month,
+                            dayDateTime.day,
+                          );
+                          final endOfDay = startOfDay.add(Duration(days: 1));
 
-                        final dayEvents = visibleEvents.where((e) {
-                          return e.startTime.isBefore(endOfDay) &&
-                              e.endTime.isAfter(startOfDay);
-                        }).toList();
+                          final dayEvents = visibleEvents.where((e) {
+                            return e.startTime.isBefore(endOfDay) &&
+                                e.endTime.isAfter(startOfDay);
+                          }).toList();
 
-                        dayEvents.sort((a, b) {
-                          int biasCmp = a.columnBias.compareTo(b.columnBias);
-                          if (biasCmp != 0) return biasCmp;
-                          return a.hashCode.compareTo(b.hashCode);
-                        });
+                          dayEvents.sort((a, b) {
+                            int biasCmp = a.columnBias.compareTo(b.columnBias);
+                            if (biasCmp != 0) return biasCmp;
+                            return a.hashCode.compareTo(b.hashCode);
+                          });
 
-                        final (eventColumns, eventMaxColumns) =
-                            _assignOverlapColumns<Event>(
-                          dayEvents,
-                          (e) => e.startTime,
-                          (e) => e.endTime,
-                        );
+                          final (eventColumns, eventMaxColumns) =
+                              _assignOverlapColumns<Event>(
+                            dayEvents,
+                            (e) => e.startTime,
+                            (e) => e.endTime,
+                          );
 
-                        return Container(
-                          height: _timelineDayExtent,
-                          color: Colors.white,
-                          child: Stack(
-                            children: [
-                              Column(
-                                children: List.generate(24, (hour) {
-                                  final timeDisplay =
-                                      DateFormat('h:00 a').format(
-                                    DateTime(2026, 1, 1, hour),
-                                  );
-                                  return Container(
-                                    height: _hourHeight,
-                                    decoration: BoxDecoration(
-                                      border: Border(
-                                        bottom: BorderSide(
-                                          color: Colors.grey.shade100,
+                          // How much detail the time labels show, based on how
+                          // zoomed in the timeline currently is.
+                          final bool isZoomedOut = _hourHeight < 60;
+                          final bool showHalfHourLabel = _hourHeight >= 110;
+                          final bool showQuarterHourLabels = _hourHeight >= 160;
+
+                          return Container(
+                            height: _timelineDayExtent,
+                            color: Colors.white,
+                            child: Stack(
+                              children: [
+                                Column(
+                                  children: [
+                                    // Clear, unmistakable boundary between one
+                                    // day and the next, with the date pinned
+                                    // at the top of every day's block.
+                                    Container(
+                                      height: _dayHeaderHeight,
+                                      width: double.infinity,
+                                      padding: const EdgeInsets.symmetric(
+                                          horizontal: 12),
+                                      alignment: Alignment.centerLeft,
+                                      decoration: BoxDecoration(
+                                        color: Colors.blue.shade50,
+                                        border: Border(
+                                          top: BorderSide(
+                                              color: Colors.blue.shade200,
+                                              width: 2),
+                                          bottom: BorderSide(
+                                              color: Colors.blue.shade100,
+                                              width: 1),
+                                        ),
+                                      ),
+                                      child: Text(
+                                        DateFormat('EEEE, MMM d')
+                                            .format(dayDateTime),
+                                        style: TextStyle(
+                                          fontSize: 13,
+                                          fontWeight: FontWeight.bold,
+                                          color: Colors.blue.shade800,
                                         ),
                                       ),
                                     ),
-                                    child: Row(
-                                      children: [
-                                        Container(
-                                          width: _leftPillarWidth,
-                                          padding: EdgeInsets.only(
-                                            left: 8,
-                                            top: 4,
+                                    ...List.generate(24, (hour) {
+                                      if (isZoomedOut && hour % 3 != 0) {
+                                        // Skip crowded labels when zoomed out —
+                                        // the grid line still renders, just no
+                                        // text, every 3rd hour gets a label.
+                                        return Container(
+                                          height: _hourHeight,
+                                          decoration: BoxDecoration(
+                                            border: Border(
+                                              bottom: BorderSide(
+                                                  color: Colors.grey.shade100),
+                                            ),
                                           ),
-                                          alignment: Alignment.topLeft,
-                                          child: Text(
-                                            hour == 0
-                                                ? '12:00 AM'
-                                                : timeDisplay,
-                                            style: TextStyle(
-                                              fontSize: 11,
-                                              color: Colors.grey.shade500,
-                                              fontWeight: FontWeight.w500,
+                                        );
+                                      }
+
+                                      final timeDisplay =
+                                          DateFormat('h:00 a').format(
+                                        DateTime(2026, 1, 1, hour),
+                                      );
+                                      return Container(
+                                        height: _hourHeight,
+                                        decoration: BoxDecoration(
+                                          border: Border(
+                                            bottom: BorderSide(
+                                              color: Colors.grey.shade100,
                                             ),
                                           ),
                                         ),
-                                        Expanded(
-                                          child: CustomPaint(
-                                            painter: HourGridPainter(
-                                              hourHeight: _hourHeight,
-                                            ),
-                                            child: Container(
-                                              color: Colors.transparent,
-                                            ),
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  );
-                                }),
-                              ),
-                              Positioned.fill(
-                                left: _leftPillarWidth,
-                                child: GestureDetector(
-                                  behavior: HitTestBehavior.opaque,
-                                  onTapUp: (details) => _openEventEditor(
-                                    targetDay: dayDateTime,
-                                    clickedOffsetDy: details.localPosition.dy,
-                                  ),
-                                  child: Container(color: Colors.transparent),
-                                ),
-                              ),
-                              ...dayEvents.map((event) {
-                                final displayStart =
-                                    event.startTime.isBefore(startOfDay)
-                                        ? startOfDay
-                                        : event.startTime;
-                                final displayEnd =
-                                    event.endTime.isAfter(endOfDay)
-                                        ? endOfDay
-                                        : event.endTime;
-
-                                final double startFractionHours =
-                                    displayStart.hour +
-                                        (displayStart.minute / 60.0);
-                                final double endFractionHours =
-                                    displayEnd.hour +
-                                        (displayEnd.minute / 60.0);
-
-                                final double topPosition =
-                                    startFractionHours * _hourHeight;
-                                final double parentTotalHeight =
-                                    (endFractionHours - startFractionHours) *
-                                        _hourHeight;
-                                final double renderHeight =
-                                    parentTotalHeight < 34.0
-                                        ? 34.0
-                                        : parentTotalHeight;
-
-                                final int colIndex = eventColumns[event] ?? 0;
-                                final int totalCols =
-                                    eventMaxColumns[event] ?? 1;
-
-                                final double rightSpacingPadding = 12.0;
-                                final double availableWidth = totalScreenWidth -
-                                    _leftPillarWidth -
-                                    rightSpacingPadding;
-                                final double widthPerColumn =
-                                    availableWidth / totalCols;
-                                final double leftPosition = _leftPillarWidth +
-                                    (colIndex * widthPerColumn) +
-                                    2;
-
-                                final double totalParentMinutes = event.endTime
-                                    .difference(event.startTime)
-                                    .inMinutes
-                                    .toDouble()
-                                    .clamp(1.0, 1440.0);
-
-                                final List<SubEvent> localSubList =
-                                    List.from(event.subEvents);
-                                localSubList.sort(
-                                  (a, b) => a.startTime.compareTo(b.startTime),
-                                );
-
-                                final (subColumns, subMaxColumns) =
-                                    _assignOverlapColumns<SubEvent>(
-                                  localSubList,
-                                  (s) => s.startTime,
-                                  (s) => s.endTime,
-                                );
-
-                                return Positioned(
-                                  top: topPosition,
-                                  left: leftPosition,
-                                  width: widthPerColumn - 3,
-                                  height: renderHeight,
-                                  child: Container(
-                                    decoration: BoxDecoration(
-                                      color: event.color.withAlpha(235),
-                                      borderRadius: BorderRadius.circular(8),
-                                      boxShadow: [
-                                        BoxShadow(
-                                          color: Colors.black12,
-                                          blurRadius: 1.5,
-                                          offset: Offset(0, 1),
-                                        ),
-                                      ],
-                                      border: Border.all(
-                                        color: event.color.withAlpha(255),
-                                        width: 1.2,
-                                      ),
-                                    ),
-                                    child: Stack(
-                                      children: [
-                                        Positioned(
-                                          top: 4,
-                                          left: 6,
-                                          right: 34,
-                                          child: Column(
-                                            crossAxisAlignment:
-                                                CrossAxisAlignment.start,
-                                            mainAxisSize: MainAxisSize.min,
-                                            children: [
-                                              Text(
-                                                event.title,
-                                                style: TextStyle(
-                                                  color: textOnColor(
-                                                    event.color,
+                                        child: Stack(
+                                          children: [
+                                            Row(
+                                              children: [
+                                                Container(
+                                                  width: _leftPillarWidth,
+                                                  padding: EdgeInsets.only(
+                                                    left: 8,
+                                                    top: 4,
                                                   ),
-                                                  fontSize: 11,
-                                                  fontWeight: FontWeight.bold,
+                                                  alignment: Alignment.topLeft,
+                                                  child: Text(
+                                                    hour == 0
+                                                        ? '12:00 AM'
+                                                        : timeDisplay,
+                                                    style: TextStyle(
+                                                      fontSize: 11,
+                                                      color:
+                                                          Colors.grey.shade500,
+                                                      fontWeight:
+                                                          FontWeight.w500,
+                                                    ),
+                                                  ),
                                                 ),
-                                                overflow: TextOverflow.ellipsis,
-                                              ),
-                                              Text(
-                                                '${DateFormat('h:mm a').format(event.startTime)} – ${DateFormat('h:mm a').format(event.endTime)}',
-                                                style: TextStyle(
-                                                  color: textOnColor(
-                                                    event.color,
-                                                  ).withAlpha(190),
-                                                  fontSize: 9,
-                                                  fontWeight: FontWeight.w500,
-                                                ),
-                                                overflow: TextOverflow.ellipsis,
-                                              ),
-                                              if (event.repeatConfig.isActive)
-                                                Icon(Icons.repeat,
-                                                    size: 9,
-                                                    color:
-                                                        textOnColor(event.color)
-                                                            .withAlpha(180)),
-                                            ],
-                                          ),
-                                        ),
-                                        if (event.subEvents.isNotEmpty)
-                                          Positioned.fill(
-                                            top: 32,
-                                            bottom: 4,
-                                            left: 4,
-                                            right: 34,
-                                            child: ClipRRect(
-                                              borderRadius:
-                                                  BorderRadius.circular(4),
-                                              child: Stack(
-                                                children:
-                                                    event.subEvents.map((sub) {
-                                                  double relativeStartMinutes =
-                                                      sub.startTime
-                                                          .difference(
-                                                            event.startTime,
-                                                          )
-                                                          .inMinutes
-                                                          .toDouble();
-                                                  double subDurationMinutes =
-                                                      sub.endTime
-                                                          .difference(
-                                                            sub.startTime,
-                                                          )
-                                                          .inMinutes
-                                                          .toDouble();
-
-                                                  double subTop =
-                                                      (relativeStartMinutes /
-                                                              totalParentMinutes) *
-                                                          (renderHeight - 36);
-                                                  double subHeight =
-                                                      (subDurationMinutes /
-                                                              totalParentMinutes) *
-                                                          (renderHeight - 36);
-                                                  subHeight = subHeight.clamp(
-                                                    18.0,
-                                                    renderHeight,
-                                                  );
-
-                                                  int sCol =
-                                                      subColumns[sub] ?? 0;
-                                                  int sTotal =
-                                                      subMaxColumns[sub] ?? 1;
-
-                                                  double subAvailableWidth =
-                                                      widthPerColumn - 38;
-                                                  double subWidthPerColumn =
-                                                      subAvailableWidth /
-                                                          sTotal;
-                                                  double subLeft =
-                                                      sCol * subWidthPerColumn;
-
-                                                  Color toneShiftedColor = event
-                                                              .color
-                                                              .computeLuminance() >
-                                                          0.5
-                                                      ? Color.alphaBlend(
-                                                          Colors.black
-                                                              .withAlpha(40),
-                                                          event.color,
-                                                        )
-                                                      : Color.alphaBlend(
-                                                          Colors.white
-                                                              .withAlpha(55),
-                                                          event.color,
-                                                        );
-
-                                                  return Positioned(
-                                                    top: subTop,
-                                                    left: subLeft,
-                                                    width:
-                                                        subWidthPerColumn - 1.5,
-                                                    height: subHeight,
+                                                Expanded(
+                                                  child: CustomPaint(
+                                                    painter: HourGridPainter(
+                                                      hourHeight: _hourHeight,
+                                                    ),
                                                     child: Container(
-                                                      decoration: BoxDecoration(
-                                                        color: toneShiftedColor,
-                                                        borderRadius:
-                                                            BorderRadius
-                                                                .circular(4),
-                                                        border: Border.all(
-                                                          color: textOnColor(
+                                                      color: Colors.transparent,
+                                                    ),
+                                                  ),
+                                                ),
+                                              ],
+                                            ),
+                                            if (showHalfHourLabel)
+                                              Positioned(
+                                                top: _hourHeight * 0.5 - 6,
+                                                left: 8,
+                                                width: _leftPillarWidth - 8,
+                                                child: Text(
+                                                  ':30',
+                                                  style: TextStyle(
+                                                    fontSize: 9,
+                                                    color: Colors.grey.shade400,
+                                                  ),
+                                                ),
+                                              ),
+                                            if (showQuarterHourLabels) ...[
+                                              Positioned(
+                                                top: _hourHeight * 0.25 - 5,
+                                                left: 8,
+                                                width: _leftPillarWidth - 8,
+                                                child: Text(
+                                                  ':15',
+                                                  style: TextStyle(
+                                                    fontSize: 8,
+                                                    color: Colors.grey.shade400,
+                                                  ),
+                                                ),
+                                              ),
+                                              Positioned(
+                                                top: _hourHeight * 0.75 - 5,
+                                                left: 8,
+                                                width: _leftPillarWidth - 8,
+                                                child: Text(
+                                                  ':45',
+                                                  style: TextStyle(
+                                                    fontSize: 8,
+                                                    color: Colors.grey.shade400,
+                                                  ),
+                                                ),
+                                              ),
+                                            ],
+                                          ],
+                                        ),
+                                      );
+                                    }),
+                                  ],
+                                ),
+                                Positioned.fill(
+                                  left: _leftPillarWidth,
+                                  top: _dayHeaderHeight,
+                                  child: GestureDetector(
+                                    behavior: HitTestBehavior.opaque,
+                                    onTapUp: (details) => _openEventEditor(
+                                      targetDay: dayDateTime,
+                                      clickedOffsetDy: details.localPosition.dy,
+                                    ),
+                                    child: Container(color: Colors.transparent),
+                                  ),
+                                ),
+                                ...dayEvents.map((event) {
+                                  final displayStart =
+                                      event.startTime.isBefore(startOfDay)
+                                          ? startOfDay
+                                          : event.startTime;
+                                  final displayEnd =
+                                      event.endTime.isAfter(endOfDay)
+                                          ? endOfDay
+                                          : event.endTime;
+
+                                  final double startFractionHours =
+                                      displayStart.hour +
+                                          (displayStart.minute / 60.0);
+                                  final double endFractionHours =
+                                      displayEnd.hour +
+                                          (displayEnd.minute / 60.0);
+
+                                  final double topPosition = _dayHeaderHeight +
+                                      (startFractionHours * _hourHeight);
+                                  final double parentTotalHeight =
+                                      (endFractionHours - startFractionHours) *
+                                          _hourHeight;
+                                  final double renderHeight =
+                                      parentTotalHeight < 34.0
+                                          ? 34.0
+                                          : parentTotalHeight;
+
+                                  final int colIndex = eventColumns[event] ?? 0;
+                                  final int totalCols =
+                                      eventMaxColumns[event] ?? 1;
+
+                                  final double rightSpacingPadding = 12.0;
+                                  final double availableWidth =
+                                      totalScreenWidth -
+                                          _leftPillarWidth -
+                                          rightSpacingPadding;
+                                  final double widthPerColumn =
+                                      availableWidth / totalCols;
+                                  final double leftPosition = _leftPillarWidth +
+                                      (colIndex * widthPerColumn) +
+                                      2;
+
+                                  final double totalParentMinutes = event
+                                      .endTime
+                                      .difference(event.startTime)
+                                      .inMinutes
+                                      .toDouble()
+                                      .clamp(1.0, 1440.0);
+
+                                  final List<SubEvent> localSubList =
+                                      List.from(event.subEvents);
+                                  localSubList.sort(
+                                    (a, b) =>
+                                        a.startTime.compareTo(b.startTime),
+                                  );
+
+                                  final (subColumns, subMaxColumns) =
+                                      _assignOverlapColumns<SubEvent>(
+                                    localSubList,
+                                    (s) => s.startTime,
+                                    (s) => s.endTime,
+                                  );
+
+                                  return Positioned(
+                                    top: topPosition,
+                                    left: leftPosition,
+                                    width: widthPerColumn - 3,
+                                    height: renderHeight,
+                                    child: Container(
+                                      decoration: BoxDecoration(
+                                        color: event.color.withAlpha(235),
+                                        borderRadius: BorderRadius.circular(8),
+                                        boxShadow: [
+                                          BoxShadow(
+                                            color: Colors.black12,
+                                            blurRadius: 1.5,
+                                            offset: Offset(0, 1),
+                                          ),
+                                        ],
+                                        border: Border.all(
+                                          color: event.color.withAlpha(255),
+                                          width: 1.2,
+                                        ),
+                                      ),
+                                      child: Stack(
+                                        children: [
+                                          Positioned(
+                                            top: 4,
+                                            left: 6,
+                                            right: 34,
+                                            child: Column(
+                                              crossAxisAlignment:
+                                                  CrossAxisAlignment.start,
+                                              mainAxisSize: MainAxisSize.min,
+                                              children: [
+                                                Text(
+                                                  event.title,
+                                                  style: TextStyle(
+                                                    color: textOnColor(
+                                                      event.color,
+                                                    ),
+                                                    fontSize: 11,
+                                                    fontWeight: FontWeight.bold,
+                                                  ),
+                                                  overflow:
+                                                      TextOverflow.ellipsis,
+                                                ),
+                                                Text(
+                                                  '${DateFormat('h:mm a').format(event.startTime)} – ${DateFormat('h:mm a').format(event.endTime)}',
+                                                  style: TextStyle(
+                                                    color: textOnColor(
+                                                      event.color,
+                                                    ).withAlpha(190),
+                                                    fontSize: 9,
+                                                    fontWeight: FontWeight.w500,
+                                                  ),
+                                                  overflow:
+                                                      TextOverflow.ellipsis,
+                                                ),
+                                                if (event.repeatConfig.isActive)
+                                                  Icon(Icons.repeat,
+                                                      size: 9,
+                                                      color: textOnColor(
+                                                              event.color)
+                                                          .withAlpha(180)),
+                                              ],
+                                            ),
+                                          ),
+                                          if (event.subEvents.isNotEmpty)
+                                            Positioned.fill(
+                                              top: 32,
+                                              bottom: 4,
+                                              left: 4,
+                                              right: 34,
+                                              child: ClipRRect(
+                                                borderRadius:
+                                                    BorderRadius.circular(4),
+                                                child: Stack(
+                                                  children: event.subEvents
+                                                      .map((sub) {
+                                                    double
+                                                        relativeStartMinutes =
+                                                        sub.startTime
+                                                            .difference(
+                                                              event.startTime,
+                                                            )
+                                                            .inMinutes
+                                                            .toDouble();
+                                                    double subDurationMinutes =
+                                                        sub.endTime
+                                                            .difference(
+                                                              sub.startTime,
+                                                            )
+                                                            .inMinutes
+                                                            .toDouble();
+
+                                                    double subTop =
+                                                        (relativeStartMinutes /
+                                                                totalParentMinutes) *
+                                                            (renderHeight - 36);
+                                                    double subHeight =
+                                                        (subDurationMinutes /
+                                                                totalParentMinutes) *
+                                                            (renderHeight - 36);
+                                                    subHeight = subHeight.clamp(
+                                                      18.0,
+                                                      renderHeight,
+                                                    );
+
+                                                    int sCol =
+                                                        subColumns[sub] ?? 0;
+                                                    int sTotal =
+                                                        subMaxColumns[sub] ?? 1;
+
+                                                    double subAvailableWidth =
+                                                        widthPerColumn - 38;
+                                                    double subWidthPerColumn =
+                                                        subAvailableWidth /
+                                                            sTotal;
+                                                    double subLeft = sCol *
+                                                        subWidthPerColumn;
+
+                                                    Color toneShiftedColor = event
+                                                                .color
+                                                                .computeLuminance() >
+                                                            0.5
+                                                        ? Color.alphaBlend(
+                                                            Colors.black
+                                                                .withAlpha(40),
                                                             event.color,
-                                                          ).withAlpha(70),
-                                                          width: 0.8,
+                                                          )
+                                                        : Color.alphaBlend(
+                                                            Colors.white
+                                                                .withAlpha(55),
+                                                            event.color,
+                                                          );
+
+                                                    return Positioned(
+                                                      top: subTop,
+                                                      left: subLeft,
+                                                      width: subWidthPerColumn -
+                                                          1.5,
+                                                      height: subHeight,
+                                                      child: Container(
+                                                        decoration:
+                                                            BoxDecoration(
+                                                          color:
+                                                              toneShiftedColor,
+                                                          borderRadius:
+                                                              BorderRadius
+                                                                  .circular(4),
+                                                          border: Border.all(
+                                                            color: textOnColor(
+                                                              event.color,
+                                                            ).withAlpha(70),
+                                                            width: 0.8,
+                                                          ),
                                                         ),
-                                                      ),
-                                                      child: Stack(
-                                                        children: [
-                                                          Positioned(
-                                                            top: 3,
-                                                            bottom: 3,
-                                                            left: 0,
-                                                            right: 0,
-                                                            child:
-                                                                GestureDetector(
-                                                              behavior:
-                                                                  HitTestBehavior
-                                                                      .opaque,
-                                                              onTap: () =>
-                                                                  _showSubEventDetailsDialog(
-                                                                sub,
-                                                                event,
-                                                              ),
-                                                              onVerticalDragUpdate:
-                                                                  (details) {
-                                                                double
-                                                                    minuteDelta =
-                                                                    (details.delta.dy /
-                                                                            _hourHeight) *
-                                                                        60;
-                                                                Duration shift =
-                                                                    Duration(
-                                                                  minutes:
-                                                                      minuteDelta
-                                                                          .round(),
-                                                                );
-                                                                if (sub.startTime
-                                                                        .add(
-                                                                          shift,
-                                                                        )
-                                                                        .isAfter(
-                                                                          event
-                                                                              .startTime,
-                                                                        ) &&
-                                                                    sub.endTime
-                                                                        .add(
-                                                                          shift,
-                                                                        )
-                                                                        .isBefore(
-                                                                          event
-                                                                              .endTime,
-                                                                        )) {
-                                                                  setState(() {
-                                                                    sub.startTime = sub
-                                                                        .startTime
-                                                                        .add(
-                                                                      shift,
-                                                                    );
-                                                                    sub.endTime = sub
-                                                                        .endTime
-                                                                        .add(
-                                                                      shift,
-                                                                    );
-                                                                  });
-                                                                }
-                                                              },
-                                                              onVerticalDragEnd:
-                                                                  (_) {
-                                                                widget.eventsNotifier
-                                                                        .value =
-                                                                    List.from(
-                                                                  widget
-                                                                      .eventsNotifier
-                                                                      .value,
-                                                                );
-                                                                HapticFeedback
-                                                                    .lightImpact();
-                                                              },
-                                                              child: Padding(
-                                                                padding:
-                                                                    const EdgeInsets
-                                                                        .symmetric(
-                                                                  horizontal:
-                                                                      3.0,
+                                                        child: Stack(
+                                                          children: [
+                                                            Positioned(
+                                                              top: 3,
+                                                              bottom: 3,
+                                                              left: 0,
+                                                              right: 0,
+                                                              child:
+                                                                  GestureDetector(
+                                                                behavior:
+                                                                    HitTestBehavior
+                                                                        .opaque,
+                                                                onTap: () =>
+                                                                    _showSubEventDetailsDialog(
+                                                                  sub,
+                                                                  event,
                                                                 ),
-                                                                child: Column(
-                                                                  crossAxisAlignment:
-                                                                      CrossAxisAlignment
-                                                                          .start,
-                                                                  mainAxisAlignment:
-                                                                      MainAxisAlignment
-                                                                          .center,
-                                                                  children: [
-                                                                    Expanded(
-                                                                      child:
-                                                                          Text(
-                                                                        sub.title,
-                                                                        style:
-                                                                            TextStyle(
-                                                                          color:
-                                                                              textOnColor(toneShiftedColor),
-                                                                          fontSize:
-                                                                              9,
-                                                                          fontWeight:
-                                                                              FontWeight.bold,
-                                                                        ),
-                                                                        overflow:
-                                                                            TextOverflow.ellipsis,
-                                                                      ),
-                                                                    ),
-                                                                  ],
-                                                                ),
-                                                              ),
-                                                            ),
-                                                          ),
-                                                          Positioned(
-                                                            top: 0,
-                                                            left: 0,
-                                                            right: 0,
-                                                            height: 4,
-                                                            child:
-                                                                GestureDetector(
-                                                              behavior:
-                                                                  HitTestBehavior
-                                                                      .opaque,
-                                                              onVerticalDragUpdate:
-                                                                  (details) {
-                                                                double
-                                                                    minuteDelta =
-                                                                    (details.delta.dy /
-                                                                            _hourHeight) *
-                                                                        60;
-                                                                DateTime
-                                                                    proposedStart =
-                                                                    sub.startTime
-                                                                        .add(
-                                                                  Duration(
+                                                                onVerticalDragUpdate:
+                                                                    (details) {
+                                                                  double
+                                                                      minuteDelta =
+                                                                      (details.delta.dy /
+                                                                              _hourHeight) *
+                                                                          60;
+                                                                  Duration
+                                                                      shift =
+                                                                      Duration(
                                                                     minutes:
                                                                         minuteDelta
                                                                             .round(),
-                                                                  ),
-                                                                );
-                                                                if (proposedStart
-                                                                        .isBefore(
+                                                                  );
+                                                                  if (sub.startTime
+                                                                          .add(
+                                                                            shift,
+                                                                          )
+                                                                          .isAfter(
+                                                                            event.startTime,
+                                                                          ) &&
                                                                       sub.endTime
-                                                                          .subtract(
-                                                                        Duration(
-                                                                          minutes:
-                                                                              5,
+                                                                          .add(
+                                                                            shift,
+                                                                          )
+                                                                          .isBefore(
+                                                                            event.endTime,
+                                                                          )) {
+                                                                    setState(
+                                                                        () {
+                                                                      sub.startTime = sub
+                                                                          .startTime
+                                                                          .add(
+                                                                        shift,
+                                                                      );
+                                                                      sub.endTime = sub
+                                                                          .endTime
+                                                                          .add(
+                                                                        shift,
+                                                                      );
+                                                                    });
+                                                                  }
+                                                                },
+                                                                onVerticalDragEnd:
+                                                                    (_) {
+                                                                  widget.eventsNotifier
+                                                                          .value =
+                                                                      List.from(
+                                                                    widget
+                                                                        .eventsNotifier
+                                                                        .value,
+                                                                  );
+                                                                  HapticFeedback
+                                                                      .lightImpact();
+                                                                },
+                                                                child: Padding(
+                                                                  padding:
+                                                                      const EdgeInsets
+                                                                          .symmetric(
+                                                                    horizontal:
+                                                                        3.0,
+                                                                  ),
+                                                                  child: Column(
+                                                                    crossAxisAlignment:
+                                                                        CrossAxisAlignment
+                                                                            .start,
+                                                                    mainAxisAlignment:
+                                                                        MainAxisAlignment
+                                                                            .center,
+                                                                    children: [
+                                                                      Expanded(
+                                                                        child:
+                                                                            Text(
+                                                                          sub.title,
+                                                                          style:
+                                                                              TextStyle(
+                                                                            color:
+                                                                                textOnColor(toneShiftedColor),
+                                                                            fontSize:
+                                                                                9,
+                                                                            fontWeight:
+                                                                                FontWeight.bold,
+                                                                          ),
+                                                                          overflow:
+                                                                              TextOverflow.ellipsis,
                                                                         ),
                                                                       ),
-                                                                    ) &&
-                                                                    proposedStart
-                                                                        .isAfter(
-                                                                      event
-                                                                          .startTime,
-                                                                    )) {
-                                                                  setState(() {
-                                                                    sub.startTime =
-                                                                        proposedStart;
-                                                                  });
-                                                                }
-                                                              },
-                                                              onVerticalDragEnd:
-                                                                  (_) {
-                                                                widget.eventsNotifier
-                                                                        .value =
-                                                                    List.from(
-                                                                  widget
-                                                                      .eventsNotifier
-                                                                      .value,
-                                                                );
-                                                                HapticFeedback
-                                                                    .lightImpact();
-                                                              },
-                                                              child: Container(
-                                                                color: Colors
-                                                                    .transparent,
+                                                                    ],
+                                                                  ),
+                                                                ),
                                                               ),
                                                             ),
-                                                          ),
-                                                          Positioned(
-                                                            bottom: 0,
-                                                            left: 0,
-                                                            right: 0,
-                                                            height: 4,
-                                                            child:
-                                                                GestureDetector(
-                                                              behavior:
-                                                                  HitTestBehavior
-                                                                      .opaque,
-                                                              onVerticalDragUpdate:
-                                                                  (details) {
-                                                                double
-                                                                    minuteDelta =
-                                                                    (details.delta.dy /
-                                                                            _hourHeight) *
-                                                                        60;
-                                                                DateTime
-                                                                    proposedEnd =
-                                                                    sub.endTime
-                                                                        .add(
-                                                                  Duration(
-                                                                    minutes:
-                                                                        minuteDelta
-                                                                            .round(),
-                                                                  ),
-                                                                );
-                                                                if (proposedEnd
-                                                                        .isAfter(
+                                                            Positioned(
+                                                              top: 0,
+                                                              left: 0,
+                                                              right: 0,
+                                                              height: 4,
+                                                              child:
+                                                                  GestureDetector(
+                                                                behavior:
+                                                                    HitTestBehavior
+                                                                        .opaque,
+                                                                onVerticalDragUpdate:
+                                                                    (details) {
+                                                                  double
+                                                                      minuteDelta =
+                                                                      (details.delta.dy /
+                                                                              _hourHeight) *
+                                                                          60;
+                                                                  DateTime
+                                                                      proposedStart =
                                                                       sub.startTime
                                                                           .add(
-                                                                        Duration(
-                                                                          minutes:
-                                                                              5,
+                                                                    Duration(
+                                                                      minutes:
+                                                                          minuteDelta
+                                                                              .round(),
+                                                                    ),
+                                                                  );
+                                                                  if (proposedStart
+                                                                          .isBefore(
+                                                                        sub.endTime
+                                                                            .subtract(
+                                                                          Duration(
+                                                                            minutes:
+                                                                                5,
+                                                                          ),
                                                                         ),
-                                                                      ),
-                                                                    ) &&
-                                                                    proposedEnd
-                                                                        .isBefore(
-                                                                      event
-                                                                          .endTime,
-                                                                    )) {
-                                                                  setState(() {
-                                                                    sub.endTime =
-                                                                        proposedEnd;
-                                                                  });
-                                                                }
-                                                              },
-                                                              onVerticalDragEnd:
-                                                                  (_) {
-                                                                widget.eventsNotifier
-                                                                        .value =
-                                                                    List.from(
-                                                                  widget
-                                                                      .eventsNotifier
-                                                                      .value,
-                                                                );
-                                                                HapticFeedback
-                                                                    .lightImpact();
-                                                              },
-                                                              child: Container(
-                                                                color: Colors
-                                                                    .transparent,
+                                                                      ) &&
+                                                                      proposedStart
+                                                                          .isAfter(
+                                                                        event
+                                                                            .startTime,
+                                                                      )) {
+                                                                    setState(
+                                                                        () {
+                                                                      sub.startTime =
+                                                                          proposedStart;
+                                                                    });
+                                                                  }
+                                                                },
+                                                                onVerticalDragEnd:
+                                                                    (_) {
+                                                                  widget.eventsNotifier
+                                                                          .value =
+                                                                      List.from(
+                                                                    widget
+                                                                        .eventsNotifier
+                                                                        .value,
+                                                                  );
+                                                                  HapticFeedback
+                                                                      .lightImpact();
+                                                                },
+                                                                child:
+                                                                    Container(
+                                                                  color: Colors
+                                                                      .transparent,
+                                                                ),
                                                               ),
                                                             ),
-                                                          ),
-                                                        ],
+                                                            Positioned(
+                                                              bottom: 0,
+                                                              left: 0,
+                                                              right: 0,
+                                                              height: 4,
+                                                              child:
+                                                                  GestureDetector(
+                                                                behavior:
+                                                                    HitTestBehavior
+                                                                        .opaque,
+                                                                onVerticalDragUpdate:
+                                                                    (details) {
+                                                                  double
+                                                                      minuteDelta =
+                                                                      (details.delta.dy /
+                                                                              _hourHeight) *
+                                                                          60;
+                                                                  DateTime
+                                                                      proposedEnd =
+                                                                      sub.endTime
+                                                                          .add(
+                                                                    Duration(
+                                                                      minutes:
+                                                                          minuteDelta
+                                                                              .round(),
+                                                                    ),
+                                                                  );
+                                                                  if (proposedEnd
+                                                                          .isAfter(
+                                                                        sub.startTime
+                                                                            .add(
+                                                                          Duration(
+                                                                            minutes:
+                                                                                5,
+                                                                          ),
+                                                                        ),
+                                                                      ) &&
+                                                                      proposedEnd
+                                                                          .isBefore(
+                                                                        event
+                                                                            .endTime,
+                                                                      )) {
+                                                                    setState(
+                                                                        () {
+                                                                      sub.endTime =
+                                                                          proposedEnd;
+                                                                    });
+                                                                  }
+                                                                },
+                                                                onVerticalDragEnd:
+                                                                    (_) {
+                                                                  widget.eventsNotifier
+                                                                          .value =
+                                                                      List.from(
+                                                                    widget
+                                                                        .eventsNotifier
+                                                                        .value,
+                                                                  );
+                                                                  HapticFeedback
+                                                                      .lightImpact();
+                                                                },
+                                                                child:
+                                                                    Container(
+                                                                  color: Colors
+                                                                      .transparent,
+                                                                ),
+                                                              ),
+                                                            ),
+                                                          ],
+                                                        ),
                                                       ),
-                                                    ),
+                                                    );
+                                                  }).toList(),
+                                                ),
+                                              ),
+                                            ),
+                                          Positioned(
+                                            top: 0,
+                                            bottom: 0,
+                                            left: 0,
+                                            right: 34,
+                                            child: MouseRegion(
+                                              cursor: SystemMouseCursors.move,
+                                              child: GestureDetector(
+                                                behavior:
+                                                    HitTestBehavior.translucent,
+                                                onTap: () =>
+                                                    _showEventDetailsDialog(
+                                                  event,
+                                                ),
+                                                onLongPress: () =>
+                                                    _showEventContextMenu(
+                                                  context,
+                                                  event,
+                                                ),
+                                                onPanStart: (_) =>
+                                                    _horizontalDragRemainder =
+                                                        0.0,
+                                                onPanUpdate: (details) {
+                                                  double minuteDelta =
+                                                      (details.delta.dy /
+                                                              _hourHeight) *
+                                                          60;
+                                                  Duration trackingShift =
+                                                      Duration(
+                                                    minutes:
+                                                        minuteDelta.round(),
                                                   );
-                                                }).toList(),
+                                                  DateTime proposedStart =
+                                                      event.startTime.add(
+                                                    trackingShift,
+                                                  );
+                                                  DateTime proposedEnd =
+                                                      event.endTime.add(
+                                                    trackingShift,
+                                                  );
+
+                                                  if (proposedStart.isAfter(
+                                                        startOfDay,
+                                                      ) &&
+                                                      proposedEnd.isBefore(
+                                                        endOfDay,
+                                                      )) {
+                                                    event.startTime =
+                                                        proposedStart;
+                                                    event.endTime = proposedEnd;
+                                                    for (var sub
+                                                        in event.subEvents) {
+                                                      sub.startTime = sub
+                                                          .startTime
+                                                          .add(trackingShift);
+                                                      sub.endTime = sub.endTime
+                                                          .add(trackingShift);
+                                                    }
+                                                  }
+
+                                                  _horizontalDragRemainder +=
+                                                      details.delta.dx;
+                                                  if (_horizontalDragRemainder
+                                                          .abs() >=
+                                                      widthPerColumn) {
+                                                    int stepDirection =
+                                                        _horizontalDragRemainder >
+                                                                0
+                                                            ? 1
+                                                            : -1;
+                                                    event.columnBias +=
+                                                        stepDirection;
+                                                    _horizontalDragRemainder -=
+                                                        stepDirection *
+                                                            widthPerColumn;
+                                                  }
+
+                                                  // Repaint this widget locally
+                                                  // while dragging — committing
+                                                  // to eventsNotifier on every
+                                                  // frame would trigger a save
+                                                  // to disk and a full
+                                                  // notification reschedule
+                                                  // dozens of times per second.
+                                                  setState(() {});
+                                                },
+                                                onPanEnd: (_) {
+                                                  // Commit once, after the
+                                                  // gesture finishes.
+                                                  widget.eventsNotifier.value =
+                                                      List.from(
+                                                    widget.eventsNotifier.value,
+                                                  );
+                                                  HapticFeedback.lightImpact();
+                                                },
+                                                child: Container(
+                                                  color: Colors.transparent,
+                                                ),
                                               ),
                                             ),
                                           ),
-                                        Positioned(
-                                          top: 0,
-                                          bottom: 0,
-                                          left: 0,
-                                          right: 34,
-                                          child: MouseRegion(
-                                            cursor: SystemMouseCursors.move,
+                                          Positioned(
+                                            right: 0,
+                                            top: 0,
+                                            bottom: 0,
+                                            width: 34,
+                                            child: Center(
+                                              child: IconButton(
+                                                padding: EdgeInsets.zero,
+                                                icon: Icon(
+                                                  Icons.delete_outline,
+                                                  size: 16,
+                                                  color:
+                                                      textOnColor(event.color)
+                                                          .withAlpha(180),
+                                                ),
+                                                onPressed: () =>
+                                                    _removeEventDirectly(event),
+                                              ),
+                                            ),
+                                          ),
+                                          Positioned(
+                                            top: 0,
+                                            left: 0,
+                                            right: 34,
+                                            height: 6,
                                             child: GestureDetector(
-                                              behavior:
-                                                  HitTestBehavior.translucent,
-                                              onTap: () =>
-                                                  _showEventDetailsDialog(
-                                                event,
-                                              ),
-                                              onLongPress: () =>
-                                                  _showEventContextMenu(
-                                                context,
-                                                event,
-                                              ),
-                                              onPanStart: (_) =>
-                                                  _horizontalDragRemainder =
-                                                      0.0,
-                                              onPanUpdate: (details) {
+                                              behavior: HitTestBehavior.opaque,
+                                              onVerticalDragUpdate: (details) {
                                                 double minuteDelta =
                                                     (details.delta.dy /
                                                             _hourHeight) *
                                                         60;
-                                                Duration trackingShift =
-                                                    Duration(
-                                                  minutes: minuteDelta.round(),
-                                                );
                                                 DateTime proposedStart =
                                                     event.startTime.add(
-                                                  trackingShift,
+                                                  Duration(
+                                                    minutes:
+                                                        minuteDelta.round(),
+                                                  ),
                                                 );
-                                                DateTime proposedEnd =
-                                                    event.endTime.add(
-                                                  trackingShift,
-                                                );
-
-                                                if (proposedStart.isAfter(
-                                                      startOfDay,
+                                                if (proposedStart.isBefore(
+                                                      event.endTime.subtract(
+                                                        Duration(minutes: 10),
+                                                      ),
                                                     ) &&
-                                                    proposedEnd.isBefore(
-                                                      endOfDay,
-                                                    )) {
-                                                  event.startTime =
-                                                      proposedStart;
-                                                  event.endTime = proposedEnd;
-                                                  for (var sub
-                                                      in event.subEvents) {
-                                                    sub.startTime = sub
-                                                        .startTime
-                                                        .add(trackingShift);
-                                                    sub.endTime = sub.endTime
-                                                        .add(trackingShift);
-                                                  }
+                                                    proposedStart
+                                                        .isAfter(startOfDay)) {
+                                                  setState(() {
+                                                    event.startTime =
+                                                        proposedStart;
+                                                  });
                                                 }
-
-                                                _horizontalDragRemainder +=
-                                                    details.delta.dx;
-                                                if (_horizontalDragRemainder
-                                                        .abs() >=
-                                                    widthPerColumn) {
-                                                  int stepDirection =
-                                                      _horizontalDragRemainder >
-                                                              0
-                                                          ? 1
-                                                          : -1;
-                                                  event.columnBias +=
-                                                      stepDirection;
-                                                  _horizontalDragRemainder -=
-                                                      stepDirection *
-                                                          widthPerColumn;
-                                                }
-
-                                                // Repaint this widget locally
-                                                // while dragging — committing
-                                                // to eventsNotifier on every
-                                                // frame would trigger a save
-                                                // to disk and a full
-                                                // notification reschedule
-                                                // dozens of times per second.
-                                                setState(() {});
                                               },
-                                              onPanEnd: (_) {
-                                                // Commit once, after the
-                                                // gesture finishes.
+                                              onVerticalDragEnd: (_) {
                                                 widget.eventsNotifier.value =
                                                     List.from(
                                                   widget.eventsNotifier.value,
@@ -2325,120 +2601,59 @@ class _DailyViewState extends State<DailyView> {
                                               ),
                                             ),
                                           ),
-                                        ),
-                                        Positioned(
-                                          right: 0,
-                                          top: 0,
-                                          bottom: 0,
-                                          width: 34,
-                                          child: Center(
-                                            child: IconButton(
-                                              padding: EdgeInsets.zero,
-                                              icon: Icon(
-                                                Icons.delete_outline,
-                                                size: 16,
-                                                color: textOnColor(event.color)
-                                                    .withAlpha(180),
+                                          Positioned(
+                                            bottom: 0,
+                                            left: 0,
+                                            right: 34,
+                                            height: 6,
+                                            child: GestureDetector(
+                                              behavior: HitTestBehavior.opaque,
+                                              onVerticalDragUpdate: (details) {
+                                                double minuteDelta =
+                                                    (details.delta.dy /
+                                                            _hourHeight) *
+                                                        60;
+                                                DateTime proposedEnd =
+                                                    event.endTime.add(
+                                                  Duration(
+                                                    minutes:
+                                                        minuteDelta.round(),
+                                                  ),
+                                                );
+                                                if (proposedEnd.isAfter(
+                                                      event.startTime.add(
+                                                        Duration(minutes: 10),
+                                                      ),
+                                                    ) &&
+                                                    proposedEnd
+                                                        .isBefore(endOfDay)) {
+                                                  setState(() {
+                                                    event.endTime = proposedEnd;
+                                                  });
+                                                }
+                                              },
+                                              onVerticalDragEnd: (_) {
+                                                widget.eventsNotifier.value =
+                                                    List.from(
+                                                  widget.eventsNotifier.value,
+                                                );
+                                                HapticFeedback.lightImpact();
+                                              },
+                                              child: Container(
+                                                color: Colors.transparent,
                                               ),
-                                              onPressed: () =>
-                                                  _removeEventDirectly(event),
                                             ),
                                           ),
-                                        ),
-                                        Positioned(
-                                          top: 0,
-                                          left: 0,
-                                          right: 34,
-                                          height: 6,
-                                          child: GestureDetector(
-                                            behavior: HitTestBehavior.opaque,
-                                            onVerticalDragUpdate: (details) {
-                                              double minuteDelta =
-                                                  (details.delta.dy /
-                                                          _hourHeight) *
-                                                      60;
-                                              DateTime proposedStart =
-                                                  event.startTime.add(
-                                                Duration(
-                                                  minutes: minuteDelta.round(),
-                                                ),
-                                              );
-                                              if (proposedStart.isBefore(
-                                                    event.endTime.subtract(
-                                                      Duration(minutes: 10),
-                                                    ),
-                                                  ) &&
-                                                  proposedStart
-                                                      .isAfter(startOfDay)) {
-                                                setState(() {
-                                                  event.startTime =
-                                                      proposedStart;
-                                                });
-                                              }
-                                            },
-                                            onVerticalDragEnd: (_) {
-                                              widget.eventsNotifier.value =
-                                                  List.from(
-                                                widget.eventsNotifier.value,
-                                              );
-                                              HapticFeedback.lightImpact();
-                                            },
-                                            child: Container(
-                                              color: Colors.transparent,
-                                            ),
-                                          ),
-                                        ),
-                                        Positioned(
-                                          bottom: 0,
-                                          left: 0,
-                                          right: 34,
-                                          height: 6,
-                                          child: GestureDetector(
-                                            behavior: HitTestBehavior.opaque,
-                                            onVerticalDragUpdate: (details) {
-                                              double minuteDelta =
-                                                  (details.delta.dy /
-                                                          _hourHeight) *
-                                                      60;
-                                              DateTime proposedEnd =
-                                                  event.endTime.add(
-                                                Duration(
-                                                  minutes: minuteDelta.round(),
-                                                ),
-                                              );
-                                              if (proposedEnd.isAfter(
-                                                    event.startTime.add(
-                                                      Duration(minutes: 10),
-                                                    ),
-                                                  ) &&
-                                                  proposedEnd
-                                                      .isBefore(endOfDay)) {
-                                                setState(() {
-                                                  event.endTime = proposedEnd;
-                                                });
-                                              }
-                                            },
-                                            onVerticalDragEnd: (_) {
-                                              widget.eventsNotifier.value =
-                                                  List.from(
-                                                widget.eventsNotifier.value,
-                                              );
-                                              HapticFeedback.lightImpact();
-                                            },
-                                            child: Container(
-                                              color: Colors.transparent,
-                                            ),
-                                          ),
-                                        ),
-                                      ],
+                                        ],
+                                      ),
                                     ),
-                                  ),
-                                );
-                              }).toList(),
-                            ],
-                          ),
-                        );
-                      },
+                                  );
+                                }).toList(),
+                              ],
+                            ),
+                          );
+                        },
+                      ),
                     );
                   },
                 ),
