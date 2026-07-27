@@ -36,9 +36,6 @@ class _MainAppAppState extends State<MainApp> {
     final loadedEvents = await StorageHelper.loadEvents();
     final loadedTasks = await StorageHelper.loadTasks();
     final loadedGroups = await StorageHelper.loadGroups();
-    debugPrint(
-      '[Storage] Loaded ${loadedEvents.length} events, ${loadedTasks.length} tasks, ${loadedGroups.length} groups',
-    );
 
     _eventsNotifier.value = loadedEvents;
     _tasksNotifier.value = loadedTasks;
@@ -49,7 +46,6 @@ class _MainAppAppState extends State<MainApp> {
     _eventsNotifier.addListener(_onEventsChanged);
     _tasksNotifier.addListener(_onTasksChanged);
     _groupsNotifier.addListener(() {
-      debugPrint('[Storage] Saving ${_groupsNotifier.value.length} groups');
       StorageHelper.saveGroups(_groupsNotifier.value);
     });
 
@@ -73,7 +69,6 @@ class _MainAppAppState extends State<MainApp> {
 
   void _onEventsChanged() {
     final current = _eventsNotifier.value;
-    debugPrint('[Storage] Saving ${current.length} events');
     StorageHelper.saveEvents(current);
 
     final currentIds = current.map((e) => e.id).toSet();
@@ -91,7 +86,6 @@ class _MainAppAppState extends State<MainApp> {
   }
 
   void _onTasksChanged() {
-    debugPrint('[Storage] Saving ${_tasksNotifier.value.length} tasks');
     StorageHelper.saveTasks(_tasksNotifier.value);
 
     NotificationService.instance

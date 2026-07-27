@@ -31,6 +31,88 @@ class _WeekViewState extends State<WeekView> {
   late DateTime _weekStart;
   bool _navigating = false;
 
+  // --- Pinch-to-zoom -------------------------------------------------------
+  // Two independent pinch gestures, tracked with raw pointer events so they
+  // never compete with the existing long-press-drag zoom or with each other:
+  //  - Pinch-in anywhere on the screen zooms out to Month.
+  //  - Pinch-out over a specific day row zooms into that Day.
+  final Map<int, Offset> _weekPinchPointers = {};
+  double? _weekPinchStartDistance;
+  bool _weekPinchTriggered = false;
+
+  final Map<int, Offset> _dayPinchPointers = {};
+  double? _dayPinchStartDistance;
+  bool _dayPinchTriggered = false;
+
+  double _pinchDistance(Map<int, Offset> pointers) {
+    final pts = pointers.values.toList();
+    return (pts[0] - pts[1]).distance.clamp(1.0, double.infinity);
+  }
+
+  void _onWeekPinchDown(PointerDownEvent event) {
+    _weekPinchPointers[event.pointer] = event.localPosition;
+    if (_weekPinchPointers.length == 2) {
+      _weekPinchStartDistance = _pinchDistance(_weekPinchPointers);
+      _weekPinchTriggered = false;
+      HapticFeedback.selectionClick();
+    }
+  }
+
+  void _onWeekPinchMove(PointerMoveEvent event) {
+    if (!_weekPinchPointers.containsKey(event.pointer)) return;
+    _weekPinchPointers[event.pointer] = event.localPosition;
+    if (_weekPinchPointers.length != 2 ||
+        _weekPinchStartDistance == null ||
+        _weekPinchTriggered) {
+      return;
+    }
+    final ratio = _pinchDistance(_weekPinchPointers) / _weekPinchStartDistance!;
+    if (ratio < 0.7) {
+      _weekPinchTriggered = true;
+      _zoomToMonth();
+    }
+  }
+
+  void _onWeekPinchEnd(PointerEvent event) {
+    _weekPinchPointers.remove(event.pointer);
+    if (_weekPinchPointers.length < 2) {
+      _weekPinchStartDistance = null;
+      _weekPinchTriggered = false;
+    }
+  }
+
+  void _onDayCellPinchDown(PointerDownEvent event) {
+    _dayPinchPointers[event.pointer] = event.localPosition;
+    if (_dayPinchPointers.length == 2) {
+      _dayPinchStartDistance = _pinchDistance(_dayPinchPointers);
+      _dayPinchTriggered = false;
+      HapticFeedback.selectionClick();
+    }
+  }
+
+  void _onDayCellPinchMove(PointerMoveEvent event, DateTime day) {
+    if (!_dayPinchPointers.containsKey(event.pointer)) return;
+    _dayPinchPointers[event.pointer] = event.localPosition;
+    if (_dayPinchPointers.length != 2 ||
+        _dayPinchStartDistance == null ||
+        _dayPinchTriggered) {
+      return;
+    }
+    final ratio = _pinchDistance(_dayPinchPointers) / _dayPinchStartDistance!;
+    if (ratio > 1.35) {
+      _dayPinchTriggered = true;
+      _zoomToDay(day);
+    }
+  }
+
+  void _onDayCellPinchEnd(PointerEvent event) {
+    _dayPinchPointers.remove(event.pointer);
+    if (_dayPinchPointers.length < 2) {
+      _dayPinchStartDistance = null;
+      _dayPinchTriggered = false;
+    }
+  }
+
   @override
   void initState() {
     super.initState();
@@ -135,7 +217,15 @@ class _WeekViewState extends State<WeekView> {
           ),
         ],
       ),
-      body: GestureDetector(
+      body: Listener(
+        // Two-finger pinch-in anywhere zooms out to Month (see handlers
+        // above). Pinch-out to zoom into a specific Day is handled per-cell
+        // below.
+        onPointerDown: _onWeekPinchDown,
+        onPointerMove: _onWeekPinchMove,
+        onPointerUp: _onWeekPinchEnd,
+        onPointerCancel: _onWeekPinchEnd,
+        child: GestureDetector(
         // Long-press-drag zoom, the same gesture used in Daily View: drag
         // up/left a real distance anywhere on the screen to zoom out to
         // Month. Zooming into a specific Day is handled per-cell below.
@@ -197,7 +287,13 @@ class _WeekViewState extends State<WeekView> {
                                     _zoomToDay(day);
                                   }
                                 },
-                                child: Container(
+                                child: Listener(
+                                  onPointerDown: _onDayCellPinchDown,
+                                  onPointerMove: (details) =>
+                                      _onDayCellPinchMove(details, day),
+                                  onPointerUp: _onDayCellPinchEnd,
+                                  onPointerCancel: _onDayCellPinchEnd,
+                                  child: Container(
                                   margin: const EdgeInsets.symmetric(vertical: 3),
                                   padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
                                   decoration: BoxDecoration(
@@ -269,6 +365,7 @@ class _WeekViewState extends State<WeekView> {
                                       ),
                                     ],
                                   ),
+                                  ),
                                 ),
                               ),
                             );
@@ -282,6 +379,7 @@ class _WeekViewState extends State<WeekView> {
             ),
           ],
         ),
+      ),
       ),
     );
   }

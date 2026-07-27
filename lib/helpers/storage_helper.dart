@@ -1,93 +1,60 @@
 import 'dart:convert';
-import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/event.dart';
 import '../models/task.dart';
 import '../models/group.dart';
 
 class StorageHelper {
-  static const String _eventsKey = 'saved_calendar_events';
-  static const String _tasksKey = 'saved_calendar_tasks';
-  static const String _groupsKey = 'saved_calendar_groups';
-  static const String _taskViewsKey = 'saved_calendar_task_views';
-  static const String _homeCardOrderKey = 'saved_home_card_order';
+  static const _eventsKey = 'saved_calendar_events';
+  static const _tasksKey = 'saved_calendar_tasks';
+  static const _groupsKey = 'saved_calendar_groups';
+  static const _taskViewsKey = 'saved_calendar_task_views';
+  static const _cardOrderKey = 'saved_home_card_order';
 
-  // Save/Load the order of cards on the home screen (a simple list of ids).
-  static Future<void> saveHomeCardOrder(List<String> order) async {
-    final prefs = await SharedPreferences.getInstance();
-    final ok = await prefs.setStringList(_homeCardOrderKey, order);
-    debugPrint('[StorageHelper] saveHomeCardOrder($order) -> $ok');
-  }
+  static Future<SharedPreferences> get _prefs =>
+      SharedPreferences.getInstance();
 
-  static Future<List<String>?> loadHomeCardOrder() async {
-    final prefs = await SharedPreferences.getInstance();
-    return prefs.getStringList(_homeCardOrderKey);
-  }
+  static Future<void> saveHomeCardOrder(List<String> order) async =>
+      (await _prefs).setStringList(_cardOrderKey, order);
 
-  // Save/Load the home screen's custom task-card views (raw JSON maps,
-  // since the view model lives in home_page.dart, not models/).
-  static Future<void> saveTaskViews(List<Map<String, dynamic>> views) async {
-    final prefs = await SharedPreferences.getInstance();
-    final ok = await prefs.setString(_taskViewsKey, jsonEncode(views));
-    debugPrint('[StorageHelper] saveTaskViews(${views.length}) -> $ok');
-  }
+  static Future<List<String>?> loadHomeCardOrder() async =>
+      (await _prefs).getStringList(_cardOrderKey);
+
+  static Future<void> saveTaskViews(List<Map<String, dynamic>> views) async =>
+      (await _prefs).setString(_taskViewsKey, jsonEncode(views));
 
   static Future<List<Map<String, dynamic>>> loadTaskViews() async {
-    final prefs = await SharedPreferences.getInstance();
-    final String? encoded = prefs.getString(_taskViewsKey);
-    if (encoded == null) return [];
-    final List decoded = jsonDecode(encoded);
-    return decoded.cast<Map<String, dynamic>>();
+    final raw = (await _prefs).getString(_taskViewsKey);
+    if (raw == null) return [];
+    return (jsonDecode(raw) as List).cast<Map<String, dynamic>>();
   }
 
-  // Save/Load Events
-  static Future<void> saveEvents(List<Event> events) async {
-    final prefs = await SharedPreferences.getInstance();
-    final String encoded = jsonEncode(events.map((e) => e.toJson()).toList());
-    final ok = await prefs.setString(_eventsKey, encoded);
-    debugPrint(
-        '[StorageHelper] saveEvents(${events.length}) -> $ok, ${encoded.length} bytes');
-  }
+  static Future<void> saveEvents(List<Event> events) async =>
+      (await _prefs).setString(
+          _eventsKey, jsonEncode(events.map((e) => e.toJson()).toList()));
 
   static Future<List<Event>> loadEvents() async {
-    final prefs = await SharedPreferences.getInstance();
-    final String? encoded = prefs.getString(_eventsKey);
-    if (encoded == null) return [];
-    final List decoded = jsonDecode(encoded);
-    return decoded.map((item) => Event.fromJson(item)).toList();
+    final raw = (await _prefs).getString(_eventsKey);
+    if (raw == null) return [];
+    return (jsonDecode(raw) as List).map((e) => Event.fromJson(e)).toList();
   }
 
-  // Save/Load Tasks
-  static Future<void> saveTasks(List<Task> tasks) async {
-    final prefs = await SharedPreferences.getInstance();
-    final String encoded = jsonEncode(tasks.map((t) => t.toJson()).toList());
-    final ok = await prefs.setString(_tasksKey, encoded);
-    debugPrint(
-        '[StorageHelper] saveTasks(${tasks.length}) -> $ok, ${encoded.length} bytes');
-  }
+  static Future<void> saveTasks(List<Task> tasks) async => (await _prefs)
+      .setString(_tasksKey, jsonEncode(tasks.map((t) => t.toJson()).toList()));
 
   static Future<List<Task>> loadTasks() async {
-    final prefs = await SharedPreferences.getInstance();
-    final String? encoded = prefs.getString(_tasksKey);
-    if (encoded == null) return [];
-    final List decoded = jsonDecode(encoded);
-    return decoded.map((item) => Task.fromJson(item)).toList();
+    final raw = (await _prefs).getString(_tasksKey);
+    if (raw == null) return [];
+    return (jsonDecode(raw) as List).map((e) => Task.fromJson(e)).toList();
   }
 
-  // Save/Load Groups
-  static Future<void> saveGroups(List<Group> groups) async {
-    final prefs = await SharedPreferences.getInstance();
-    final String encoded = jsonEncode(groups.map((g) => g.toJson()).toList());
-    final ok = await prefs.setString(_groupsKey, encoded);
-    debugPrint(
-        '[StorageHelper] saveGroups(${groups.length}) -> $ok, ${encoded.length} bytes');
-  }
+  static Future<void> saveGroups(List<Group> groups) async =>
+      (await _prefs).setString(
+          _groupsKey, jsonEncode(groups.map((g) => g.toJson()).toList()));
 
   static Future<List<Group>> loadGroups() async {
-    final prefs = await SharedPreferences.getInstance();
-    final String? encoded = prefs.getString(_groupsKey);
-    if (encoded == null) return [];
-    final List decoded = jsonDecode(encoded);
-    return decoded.map((item) => Group.fromJson(item)).toList();
+    final raw = (await _prefs).getString(_groupsKey);
+    if (raw == null) return [];
+    return (jsonDecode(raw) as List).map((e) => Group.fromJson(e)).toList();
   }
 }
